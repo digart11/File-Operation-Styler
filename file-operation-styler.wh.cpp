@@ -2,7 +2,7 @@
 // @id              file-operation-styler
 // @name            File Operation Styler
 // @description     Experimental dark skin for native file-operation tiles.
-// @version         0.10.13
+// @version         0.10.17
 // @author          digART
 // @license         GPL-3.0
 // @include         explorer.exe
@@ -296,24 +296,25 @@ namespace
     std::mutex g_transferSummaryMutex;
     std::vector<TransferSummaryState> g_transferSummaries;
 
-    constexpr COLORREF kBackgroundColor = RGB(24, 24, 24);
-    constexpr COLORREF kPrimaryTextColor = RGB(245, 245, 245);
-    constexpr COLORREF kSecondaryTextColor = RGB(165, 165, 165);
-    constexpr int kRequestedTileWidth = 612;
-    constexpr int kReservedLeftWidth = 160;
-    constexpr int kContentTopPadding = 8;
-    constexpr int kContentRightPadding = 16;
-    constexpr int kContentBottomPadding = 8;
+    constexpr COLORREF kBackgroundColor = RGB(16, 21, 28);
+    constexpr COLORREF kPrimaryTextColor = RGB(242, 244, 247);
+    constexpr COLORREF kSecondaryTextColor = RGB(154, 163, 174);
+    constexpr int kRequestedTileWidth = 548;
+    constexpr int kReservedLeftWidth = 152;
+    constexpr int kContentTopPadding = 5;
+    constexpr int kContentRightPadding = 12;
+    constexpr int kContentBottomPadding = 5;
     constexpr int kTileVerticalMargin = 4;
-    constexpr int kCircleColumnWidth = 160;
+    constexpr int kCircleColumnWidth = 152;
     constexpr int kCircleWindowHeight = 144;
     constexpr int kCircleDiameter = 120;
     constexpr int kCircleTop = 8;
     constexpr int kCircleStrokeWidth = 6;
-    constexpr COLORREF kInactiveRingColor = RGB(54, 59, 66);
-    constexpr COLORREF kAccentRingColor = RGB(16, 144, 226);
-    constexpr COLORREF kGraphSurfaceColor = RGB(18, 23, 29);
-    constexpr int kGraphHeight = 68;
+    constexpr COLORREF kInactiveRingColor = RGB(58, 65, 74);
+    constexpr COLORREF kAccentRingColor = RGB(21, 151, 229);
+    constexpr COLORREF kGraphSurfaceColor = RGB(23, 29, 37);
+    constexpr int kGraphHeight = 48;
+    constexpr int kChartAreaHeight = 56;
     constexpr wchar_t kCircleWindowClass[] =
         L"Windhawk.FileOperationStyler.ProgressCircle.0.10.3";
     constexpr UINT_PTR kHostWindowSubclassId = 0xF0510010;
@@ -2076,7 +2077,7 @@ namespace
         if (summary)
         {
             HRESULT foregroundResult = Element_SetForegroundColor_Original(
-                summary, kAccentRingColor);
+                summary, kPrimaryTextColor);
             if (FAILED(foregroundResult))
             {
                 LogSetterFailure(eventId, L"eltSummary", L"foreground",
@@ -2109,7 +2110,7 @@ namespace
             }
 
             HRESULT marginResult =
-                Element_SetMargin_Original(summary, 0, 6, 0, 6);
+                Element_SetMargin_Original(summary, 0, 2, 0, 5);
             if (FAILED(marginResult))
             {
                 LogSetterFailure(eventId, L"eltSummary", L"margin",
@@ -2174,11 +2175,11 @@ namespace
             COLORREF color;
         };
         constexpr DescriptionTarget descriptionTargets[] = {
-            {L"eltStartText", kPrimaryTextColor},
+            {L"eltStartText", kSecondaryTextColor},
             {L"eltFirstLocation", kAccentRingColor},
-            {L"eltMiddleText", kPrimaryTextColor},
+            {L"eltMiddleText", kSecondaryTextColor},
             {L"eltSecondLocation", kAccentRingColor},
-            {L"eltEndText", kPrimaryTextColor},
+            {L"eltEndText", kSecondaryTextColor},
         };
 
         for (auto const &target : descriptionTargets)
@@ -2239,12 +2240,19 @@ namespace
             HRESULT backgroundResult =
                 Element_SetBackgroundColor_Original(chartArea,
                                                     kGraphSurfaceColor);
+            HRESULT heightResult = Element_SetRelPixHeight_Original(
+                chartArea, kChartAreaHeight);
             HRESULT marginResult =
-                Element_SetMargin_Original(chartArea, 0, 6, 0, 6);
+                Element_SetMargin_Original(chartArea, 0, 4, 0, 4);
             if (FAILED(backgroundResult))
             {
                 LogSetterFailure(eventId, L"eltChartArea", L"background",
                                  backgroundResult);
+            }
+            if (FAILED(heightResult))
+            {
+                LogSetterFailure(eventId, L"eltChartArea",
+                                 L"relative-pixel-height", heightResult);
             }
             if (FAILED(marginResult))
             {
@@ -2264,7 +2272,7 @@ namespace
                 Element_SetBackgroundColor_Original(rateChart,
                                                     kGraphSurfaceColor);
             HRESULT marginResult =
-                Element_SetMargin_Original(rateChart, 0, 4, 0, 6);
+                Element_SetMargin_Original(rateChart, 0, 0, 0, 0);
             if (FAILED(heightResult))
             {
                 LogSetterFailure(eventId, L"eltRateChart_New",
@@ -2317,7 +2325,7 @@ namespace
                 lstrcmpW(target.name, L"eltTimeRemainingLabel") == 0 ||
                 lstrcmpW(target.name, L"eltItemsRemainingLabel") == 0;
             HRESULT marginResult = Element_SetMargin_Original(
-                element, 0, 2, isLabel ? 6 : 0, 2);
+                element, 0, 1, isLabel ? 10 : 0, 2);
 
             if (FAILED(foregroundResult))
                 LogSetterFailure(eventId, target.name,
@@ -2334,6 +2342,57 @@ namespace
             if (FAILED(marginResult))
                 LogSetterFailure(eventId, target.name, L"margin-detail",
                                  marginResult);
+        }
+
+        // Style the existing native action controls as part of the same
+        // visual pass. Their parentage/actions remain untouched.
+        struct ActionControlTarget
+        {
+            PCWSTR name;
+            COLORREF color;
+            int size;
+            int leftMargin;
+        };
+        constexpr ActionControlTarget actionControlTargets[] = {
+            {L"eltPauseButton", kAccentRingColor, 18, 8},
+            {L"eltCancelButton", kSecondaryTextColor, 18, 10},
+        };
+
+        for (auto const &target : actionControlTargets)
+        {
+            DirectUI::Element *element = FindSkinElement(
+                operationTileRoot, state.tileHeaderRoot, target.name, false);
+            if (!element)
+            {
+                continue;
+            }
+
+            HRESULT foregroundResult =
+                Element_SetForegroundColor_Original(element, target.color);
+            HRESULT faceResult = Element_SetFontFace_Original(
+                element, L"Segoe UI Variable");
+            HRESULT sizeResult =
+                Element_SetFontSize_Original(element, target.size);
+            HRESULT weightResult =
+                Element_SetFontWeight_Original(element, 500);
+            HRESULT marginResult = Element_SetMargin_Original(
+                element, target.leftMargin, 0, 2, 0);
+
+            if (FAILED(foregroundResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"foreground-action", foregroundResult);
+            if (FAILED(faceResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"font-face-action", faceResult);
+            if (FAILED(sizeResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"font-size-action", sizeResult);
+            if (FAILED(weightResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"font-weight-action", weightResult);
+            if (FAILED(marginResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"margin-action", marginResult);
         }
 
         Wh_Log(L"eventId=%llu skin background=%s summary=%s primary=%u/%u "
@@ -2653,7 +2712,7 @@ namespace
 
 BOOL Wh_ModInit()
 {
-    Wh_Log(L"File Operation Styler 0.10.13 initialization started");
+    Wh_Log(L"File Operation Styler 0.10.17 initialization started");
 
     if (!InitializeProgressCircleUi())
     {
@@ -2667,7 +2726,7 @@ BOOL Wh_ModInit()
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 0.10.13 ready");
+    Wh_Log(L"File Operation Styler 0.10.17 ready");
     return TRUE;
 }
 
@@ -2679,5 +2738,5 @@ void Wh_ModUninit()
         g_transferSummaries.clear();
     }
     ClearSkinState();
-    Wh_Log(L"File Operation Styler 0.10.13 uninitialization complete");
+    Wh_Log(L"File Operation Styler 0.10.17 uninitialization complete");
 }
