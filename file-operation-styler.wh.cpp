@@ -2,12 +2,12 @@
 // @id              file-operation-styler
 // @name            File Operation Styler
 // @description     Experimental dark skin for native file-operation tiles.
-// @version         0.10.5
+// @version         0.10.13
 // @author          digART
 // @license         GPL-3.0
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -lcomctl32 -lgdi32 -lgdiplus
+// @compilerOptions -lcomctl32 -lgdi32 -lgdiplus -lshlwapi
 // ==/WindhawkMod==
 
 // Experimental first-pass skin for the native DirectUI file-operation tile.
@@ -18,11 +18,13 @@
 
 #include <commctrl.h>
 #include <gdiplus.h>
+#include <shlwapi.h>
 #include <windows.h>
 
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <string>
 #include <vector>
 
 struct COperationStatusTile;
@@ -219,6 +221,21 @@ namespace
                                                     int bottom);
     Element_SetPadding_t Element_SetPadding_Original;
 
+    using Element_SetVisible_t = HRESULT(__cdecl *)(
+        DirectUI::Element *thisPtr,
+        bool visible);
+    Element_SetVisible_t Element_SetVisible_Original;
+
+    using Element_SetRelPixHeight_t = HRESULT(__cdecl *)(
+        DirectUI::Element *thisPtr,
+        int height);
+    Element_SetRelPixHeight_t Element_SetRelPixHeight_Original;
+
+    using Element_SetContentString_t = HRESULT(__cdecl *)(
+        DirectUI::Element *thisPtr,
+        PCWSTR content);
+    Element_SetContentString_t Element_SetContentString_Original;
+
     using Element_GetRootRelativeBounds_t = HRESULT(__cdecl *)(
         DirectUI::Element *thisPtr,
         RECT *bounds);
@@ -250,6 +267,35 @@ namespace
         OperationTileElement *thisPtr);
     OperationTileElement_Destructor_t OperationTileElement_Destructor_Original;
 
+    using COperationStatusTile_UpdateRemainingItemsAndSize_t =
+        HRESULT(__cdecl *)(COperationStatusTile *thisPtr,
+                           unsigned long long completedItems,
+                           unsigned long long totalItems,
+                           unsigned long long completedBytes,
+                           unsigned long long totalBytes);
+    COperationStatusTile_UpdateRemainingItemsAndSize_t
+        COperationStatusTile_UpdateRemainingItemsAndSize_Original;
+
+    using COperationStatusTile_UpdateSummary_t = HRESULT(__cdecl *)(
+        COperationStatusTile *thisPtr,
+        PCWSTR summary);
+    COperationStatusTile_UpdateSummary_t COperationStatusTile_UpdateSummary_Original;
+
+    struct TransferSummaryState
+    {
+        COperationStatusTile *owner;
+        OperationTileElement *tile;
+        DirectUI::Element *operationTileRoot;
+        DirectUI::Element *tileHeaderRoot;
+        unsigned long long completedBytes;
+        unsigned long long totalBytes;
+        bool bytesValid;
+        std::wstring nativeSummary;
+    };
+
+    std::mutex g_transferSummaryMutex;
+    std::vector<TransferSummaryState> g_transferSummaries;
+
     constexpr COLORREF kBackgroundColor = RGB(24, 24, 24);
     constexpr COLORREF kPrimaryTextColor = RGB(245, 245, 245);
     constexpr COLORREF kSecondaryTextColor = RGB(165, 165, 165);
@@ -266,6 +312,8 @@ namespace
     constexpr int kCircleStrokeWidth = 6;
     constexpr COLORREF kInactiveRingColor = RGB(54, 59, 66);
     constexpr COLORREF kAccentRingColor = RGB(16, 144, 226);
+    constexpr COLORREF kGraphSurfaceColor = RGB(18, 23, 29);
+    constexpr int kGraphHeight = 68;
     constexpr wchar_t kCircleWindowClass[] =
         L"Windhawk.FileOperationStyler.ProgressCircle.0.10.3";
     constexpr UINT_PTR kHostWindowSubclassId = 0xF0510010;
@@ -802,35 +850,39 @@ namespace
         return result;
     }
 
-    void DestroyCircleForProgressWindow(HWND progressWindow)
+    void DetachCircleFromProgressWindow(HWND progressWindow)
     {
-        CircleState removed{};
-        bool found = false;
+        HWND hostWindow = nullptr;
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
             auto it = std::find_if(
                 g_circles.begin(), g_circles.end(),
                 [progressWindow](CircleState const &state)
-                {
-                    return state.progressWindow == progressWindow;
-                });
-            if (it != g_circles.end())
+                { return state.progressWindow == progressWindow; });
+            if (it == g_circles.end())
             {
-                removed = *it;
-                g_circles.erase(it);
-                found = true;
+                return;
             }
+
+            hostWindow = it->hostWindow;
+            it->progressWindow = nullptr;
+            it->positionValid = false;
         }
 
-        if (found && removed.circleWindow &&
-            IsWindow(removed.circleWindow))
+        // More/Fewer Details can replace the native progress HWND while the
+        // OperationTileElement itself stays alive. The circle belongs to the
+        // tile, not to that temporary HWND. Keep the circle VISIBLE during
+        // the handoff; hiding it here caused it to disappear permanently when
+        // Explorer created the replacement progress HWND after our deferred
+        // reposition message had already run.
+        //
+        // The tile-relative bounds remain valid across the transition, so the
+        // existing circle can stay on screen and will rebind to the new native
+        // progress HWND on the next layout/progress notification.
+        if (hostWindow && IsWindow(hostWindow))
         {
-            DestroyWindow(removed.circleWindow);
-        }
-        if (found && removed.hostWindow && IsWindow(removed.hostWindow))
-        {
-            ScheduleProgressCirclePosition(removed.hostWindow,
-                                           L"tile-removed");
+            ScheduleProgressCirclePosition(hostWindow,
+                                           L"progress-hwnd-recreated");
         }
     }
 
@@ -847,7 +899,7 @@ namespace
         {
             RemoveWindowSubclass(window, NativeProgressWindowSubclassProc,
                                  subclassId);
-            DestroyCircleForProgressWindow(window);
+            DetachCircleFromProgressWindow(window);
         }
         else if (message == WM_WINDOWPOSCHANGED)
         {
@@ -916,6 +968,40 @@ namespace
         bool placementAvailable = false;
         bool positionChanged = false;
         bool initialPlacement = false;
+
+        // A compact/expanded transition can swap the progress HWND without
+        // changing the tile. Re-resolve it here, including while paused when
+        // no progress-position notification may arrive.
+        HWND latestProgressWindow =
+            OperationTileElement_GetProgressHWND_Original(tile);
+        if (latestProgressWindow && !IsWindow(latestProgressWindow))
+        {
+            latestProgressWindow = nullptr;
+        }
+
+        HWND progressWindowToSubclass = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto bindingIt = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [tile](CircleState const &state)
+                { return state.tile == tile; });
+            if (bindingIt != g_circles.end() && latestProgressWindow &&
+                bindingIt->progressWindow != latestProgressWindow)
+            {
+                bindingIt->progressWindow = latestProgressWindow;
+                bindingIt->positionValid = false;
+                progressWindowToSubclass = latestProgressWindow;
+            }
+        }
+
+        if (progressWindowToSubclass)
+        {
+            SetWindowSubclass(progressWindowToSubclass,
+                              NativeProgressWindowSubclassProc,
+                              kProgressWindowSubclassId, 0);
+        }
+
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
             auto it = std::find_if(
@@ -938,15 +1024,30 @@ namespace
                               it->positionHeight != height;
         }
 
-        if (!placementAvailable || !positionChanged || !circleWindow ||
-            !IsWindow(circleWindow))
+        bool visibilityChanged =
+            circleWindow && IsWindow(circleWindow) &&
+            !IsWindowVisible(circleWindow);
+        if (!placementAvailable || !circleWindow || !IsWindow(circleWindow))
         {
             return;
         }
 
+        // More/Fewer Details rearranges native child HWNDs and can place the
+        // OperationTileHost back above our circle in sibling Z-order without
+        // changing the circle's coordinates or WS_VISIBLE state. The previous
+        // early-out therefore left a perfectly live circle hidden behind the
+        // native host. Every deferred layout notification is a safe point to
+        // reassert HWND_TOP. If geometry didn't change, do it without moving or
+        // resizing the circle.
+        UINT positionFlags =
+            SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_SHOWWINDOW;
+        if (!positionChanged)
+        {
+            positionFlags |= SWP_NOMOVE | SWP_NOSIZE;
+        }
+
         if (!SetWindowPos(circleWindow, HWND_TOP, x, y, width, height,
-                          SWP_NOACTIVATE | SWP_NOOWNERZORDER |
-                              SWP_SHOWWINDOW))
+                          positionFlags))
         {
             Wh_Log(L"eventId=%llu circle SetWindowPos failed tile=%p "
                    L"host=%p error=%lu",
@@ -973,9 +1074,11 @@ namespace
         }
 
         Wh_Log(L"circle position tile=%p x=%d y=%d width=%d height=%d "
-               L"reason=%s",
+               L"reason=%s geometryChanged=%s visibilityChanged=%s",
                reinterpret_cast<void *>(tile), x, y, width, height,
-               initialPlacement ? L"initial" : reason);
+               initialPlacement ? L"initial" : reason,
+               positionChanged ? L"yes" : L"no",
+               visibilityChanged ? L"yes" : L"no");
     }
 
     void PositionProgressCirclesForHost(HWND hostWindow, PCWSTR reason)
@@ -1069,6 +1172,173 @@ namespace
             return hostWindow;
         }
         return FindCurrentThreadOperationStatusWindow(eventId);
+    }
+
+    int GetStoredCirclePercent(OperationTileElement *tile)
+    {
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        auto it = std::find_if(
+            g_circles.begin(), g_circles.end(),
+            [tile](CircleState const &state)
+            { return state.tile == tile; });
+        return it != g_circles.end() ? it->progressPercent : -1;
+    }
+
+    void RegisterTransferSummary(COperationStatusTile *owner,
+                                 OperationTileElement *tile,
+                                 DirectUI::Element *operationTileRoot,
+                                 DirectUI::Element *tileHeaderRoot)
+    {
+        std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+        auto it = std::find_if(
+            g_transferSummaries.begin(), g_transferSummaries.end(),
+            [owner](TransferSummaryState const &state)
+            { return state.owner == owner; });
+        if (it == g_transferSummaries.end())
+        {
+            g_transferSummaries.push_back(
+                {owner, tile, operationTileRoot, tileHeaderRoot, 0, 0, false, {}});
+        }
+        else
+        {
+            it->tile = tile;
+            it->operationTileRoot = operationTileRoot;
+            it->tileHeaderRoot = tileHeaderRoot;
+        }
+    }
+
+    void RemoveTransferSummary(OperationTileElement *tile)
+    {
+        std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+        g_transferSummaries.erase(
+            std::remove_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [tile](TransferSummaryState const &state)
+                { return state.tile == tile; }),
+            g_transferSummaries.end());
+    }
+
+    void ApplyTransferSummary(COperationStatusTile *owner)
+    {
+        TransferSummaryState state{};
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner](TransferSummaryState const &candidate)
+                { return candidate.owner == owner; });
+            if (it == g_transferSummaries.end() || !it->bytesValid ||
+                !it->operationTileRoot)
+            {
+                return;
+            }
+            state = *it;
+        }
+
+        DirectUI::Element *summary = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltSummary", false);
+        if (!summary)
+        {
+            return;
+        }
+
+        wchar_t completedText[64]{};
+        wchar_t totalText[64]{};
+        wchar_t combinedText[176]{};
+        if (!StrFormatByteSizeW(static_cast<LONGLONG>(state.completedBytes),
+                                completedText, ARRAYSIZE(completedText)) ||
+            !StrFormatByteSizeW(static_cast<LONGLONG>(state.totalBytes),
+                                totalText, ARRAYSIZE(totalText)))
+        {
+            return;
+        }
+
+        int percent = GetStoredCirclePercent(state.tile);
+        if (percent >= 0)
+        {
+            wsprintfW(combinedText, L"%s / %s (%d%%)", completedText,
+                      totalText, percent);
+        }
+        else
+        {
+            wsprintfW(combinedText, L"%s / %s", completedText, totalText);
+        }
+
+        Element_SetContentString_Original(summary, combinedText);
+
+        // SetContentString on eltSummary can also influence the top-level
+        // caption. Put Explorer's own summary text back into the window title
+        // so only the body line becomes transferred/total/percent.
+        if (!state.nativeSummary.empty())
+        {
+            HWND progressWindow =
+                OperationTileElement_GetProgressHWND_Original(state.tile);
+            HWND hostWindow =
+                GetOperationStatusWindowForTile(progressWindow, 0);
+            if (hostWindow)
+            {
+                SetWindowTextW(hostWindow, state.nativeSummary.c_str());
+            }
+        }
+    }
+
+    void RecordTransferBytes(COperationStatusTile *owner,
+                             unsigned long long completedBytes,
+                             unsigned long long totalBytes)
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner](TransferSummaryState const &state)
+                { return state.owner == owner; });
+            if (it == g_transferSummaries.end())
+            {
+                return;
+            }
+            it->completedBytes = completedBytes;
+            it->totalBytes = totalBytes;
+            it->bytesValid = true;
+        }
+        ApplyTransferSummary(owner);
+    }
+
+    void RecordNativeSummary(COperationStatusTile *owner, PCWSTR summary)
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner](TransferSummaryState const &state)
+                { return state.owner == owner; });
+            if (it == g_transferSummaries.end())
+            {
+                return;
+            }
+            it->nativeSummary = summary ? summary : L"";
+        }
+        ApplyTransferSummary(owner);
+    }
+
+    void RefreshTransferSummaryForTile(OperationTileElement *tile)
+    {
+        COperationStatusTile *owner = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [tile](TransferSummaryState const &state)
+                { return state.tile == tile; });
+            if (it != g_transferSummaries.end())
+            {
+                owner = it->owner;
+            }
+        }
+        if (owner)
+        {
+            ApplyTransferSummary(owner);
+        }
     }
 
     struct NativeProgressSnapshot
@@ -1267,6 +1537,7 @@ namespace
         NativeProgressSnapshot progress =
             ReadNativeProgress(progressWindow, fallbackPercent);
         EnsureProgressCircle(tile, 0, progress);
+        RefreshTransferSummaryForTile(tile);
     }
 
     void DestroyProgressCircle(OperationTileElement *tile)
@@ -1499,9 +1770,41 @@ namespace
         UpdateProgressCircle(thisPtr);
     }
 
+    HRESULT __cdecl COperationStatusTile_UpdateRemainingItemsAndSize_Hook(
+        COperationStatusTile *thisPtr,
+        unsigned long long completedItems,
+        unsigned long long totalItems,
+        unsigned long long completedBytes,
+        unsigned long long totalBytes)
+    {
+        HRESULT result =
+            COperationStatusTile_UpdateRemainingItemsAndSize_Original(
+                thisPtr, completedItems, totalItems, completedBytes,
+                totalBytes);
+        if (SUCCEEDED(result))
+        {
+            RecordTransferBytes(thisPtr, completedBytes, totalBytes);
+        }
+        return result;
+    }
+
+    HRESULT __cdecl COperationStatusTile_UpdateSummary_Hook(
+        COperationStatusTile *thisPtr,
+        PCWSTR summary)
+    {
+        HRESULT result = COperationStatusTile_UpdateSummary_Original(
+            thisPtr, summary);
+        if (SUCCEEDED(result))
+        {
+            RecordNativeSummary(thisPtr, summary);
+        }
+        return result;
+    }
+
     void __cdecl OperationTileElement_Destructor_Hook(
         OperationTileElement *thisPtr)
     {
+        RemoveTransferSummary(thisPtr);
         DestroyProgressCircle(thisPtr);
         OperationTileElement_Destructor_Original(thisPtr);
     }
@@ -1762,6 +2065,8 @@ namespace
         NativeProgressSnapshot initialProgress =
             ReadNativeProgress(nativeProgressWindow, 0);
         EnsureProgressCircle(operationTile, eventId, initialProgress);
+        RegisterTransferSummary(thisPtr, operationTile, operationTileRoot,
+                                state.tileHeaderRoot);
 
         DirectUI::Element *summary =
             FindSkinElement(operationTileRoot, state.tileHeaderRoot,
@@ -1860,6 +2165,177 @@ namespace
             allFontsApplied = allFontsApplied && textResult.fontApplied;
         }
 
+        // Keep the native description structure, but make the operation line
+        // a deliberate visual header. Locations retain the blue accent while
+        // the connecting text uses the primary foreground.
+        struct DescriptionTarget
+        {
+            PCWSTR name;
+            COLORREF color;
+        };
+        constexpr DescriptionTarget descriptionTargets[] = {
+            {L"eltStartText", kPrimaryTextColor},
+            {L"eltFirstLocation", kAccentRingColor},
+            {L"eltMiddleText", kPrimaryTextColor},
+            {L"eltSecondLocation", kAccentRingColor},
+            {L"eltEndText", kPrimaryTextColor},
+        };
+
+        for (auto const &target : descriptionTargets)
+        {
+            DirectUI::Element *element = FindSkinElement(
+                operationTileRoot, state.tileHeaderRoot, target.name, true);
+            if (!element)
+            {
+                continue;
+            }
+
+            HRESULT colorResult =
+                Element_SetForegroundColor_Original(element, target.color);
+            if (FAILED(colorResult))
+            {
+                LogSetterFailure(eventId, target.name, L"foreground-header",
+                                 colorResult);
+            }
+
+            HRESULT sizeResult = Element_SetFontSize_Original(element, 17);
+            if (FAILED(sizeResult))
+            {
+                LogSetterFailure(eventId, target.name, L"font-size-header",
+                                 sizeResult);
+            }
+
+            HRESULT weightResult = Element_SetFontWeight_Original(element, 400);
+            if (FAILED(weightResult))
+            {
+                LogSetterFailure(eventId, target.name, L"font-weight-header",
+                                 weightResult);
+            }
+        }
+
+        // Deliberate visual pass using only verified native DirectUI
+        // descendants. Keep their existing parents/order intact.
+        for (PCWSTR name : {L"eltItemNameLabel", L"eltItemName"})
+        {
+            DirectUI::Element *element = FindSkinElement(
+                operationTileRoot, state.tileHeaderRoot, name, false);
+            if (!element)
+            {
+                continue;
+            }
+            HRESULT visibleResult =
+                Element_SetVisible_Original(element, false);
+            if (FAILED(visibleResult))
+            {
+                LogSetterFailure(eventId, name, L"visible=false",
+                                 visibleResult);
+            }
+        }
+
+        DirectUI::Element *chartArea = FindSkinElement(
+            operationTileRoot, state.tileHeaderRoot, L"eltChartArea", false);
+        if (chartArea)
+        {
+            HRESULT backgroundResult =
+                Element_SetBackgroundColor_Original(chartArea,
+                                                    kGraphSurfaceColor);
+            HRESULT marginResult =
+                Element_SetMargin_Original(chartArea, 0, 6, 0, 6);
+            if (FAILED(backgroundResult))
+            {
+                LogSetterFailure(eventId, L"eltChartArea", L"background",
+                                 backgroundResult);
+            }
+            if (FAILED(marginResult))
+            {
+                LogSetterFailure(eventId, L"eltChartArea", L"margin",
+                                 marginResult);
+            }
+        }
+
+        DirectUI::Element *rateChart = FindSkinElement(
+            operationTileRoot, state.tileHeaderRoot,
+            L"eltRateChart_New", false);
+        if (rateChart)
+        {
+            HRESULT heightResult = Element_SetRelPixHeight_Original(
+                rateChart, kGraphHeight);
+            HRESULT backgroundResult =
+                Element_SetBackgroundColor_Original(rateChart,
+                                                    kGraphSurfaceColor);
+            HRESULT marginResult =
+                Element_SetMargin_Original(rateChart, 0, 4, 0, 6);
+            if (FAILED(heightResult))
+            {
+                LogSetterFailure(eventId, L"eltRateChart_New",
+                                 L"relative-pixel-height", heightResult);
+            }
+            if (FAILED(backgroundResult))
+            {
+                LogSetterFailure(eventId, L"eltRateChart_New",
+                                 L"background", backgroundResult);
+            }
+            if (FAILED(marginResult))
+            {
+                LogSetterFailure(eventId, L"eltRateChart_New", L"margin",
+                                 marginResult);
+            }
+        }
+
+        struct DetailTarget
+        {
+            PCWSTR name;
+            COLORREF color;
+            int size;
+            int weight;
+        };
+        constexpr DetailTarget detailTargets[] = {
+            {L"eltTimeRemainingLabel", kSecondaryTextColor, 16, 400},
+            {L"eltTimeRemaining", kPrimaryTextColor, 16, 500},
+            {L"eltItemsRemainingLabel", kSecondaryTextColor, 16, 400},
+            {L"eltItemsRemaining", kPrimaryTextColor, 16, 500},
+        };
+
+        for (auto const &target : detailTargets)
+        {
+            DirectUI::Element *element = FindSkinElement(
+                operationTileRoot, state.tileHeaderRoot, target.name, false);
+            if (!element)
+            {
+                continue;
+            }
+
+            HRESULT foregroundResult =
+                Element_SetForegroundColor_Original(element, target.color);
+            HRESULT faceResult = Element_SetFontFace_Original(
+                element, L"Segoe UI Variable");
+            HRESULT sizeResult =
+                Element_SetFontSize_Original(element, target.size);
+            HRESULT weightResult =
+                Element_SetFontWeight_Original(element, target.weight);
+            bool isLabel =
+                lstrcmpW(target.name, L"eltTimeRemainingLabel") == 0 ||
+                lstrcmpW(target.name, L"eltItemsRemainingLabel") == 0;
+            HRESULT marginResult = Element_SetMargin_Original(
+                element, 0, 2, isLabel ? 6 : 0, 2);
+
+            if (FAILED(foregroundResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"foreground-detail", foregroundResult);
+            if (FAILED(faceResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"font-face-detail", faceResult);
+            if (FAILED(sizeResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"font-size-detail", sizeResult);
+            if (FAILED(weightResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"font-weight-detail", weightResult);
+            if (FAILED(marginResult))
+                LogSetterFailure(eventId, target.name, L"margin-detail",
+                                 marginResult);
+        }
+
         Wh_Log(L"eventId=%llu skin background=%s summary=%s primary=%u/%u "
                L"secondary=%u/%u font=%s",
                eventId, SUCCEEDED(backgroundResult) ? L"yes" : L"no",
@@ -1885,12 +2361,18 @@ namespace
         Element_SetRelPixWidth_t setRelPixWidth;
         Element_SetMargin_t setMargin;
         Element_SetPadding_t setPadding;
+        Element_SetVisible_t setVisible;
+        Element_SetRelPixHeight_t setRelPixHeight;
+        Element_SetContentString_t setContentString;
         Element_GetRootRelativeBounds_t getRootRelativeBounds;
         COperationStatusTile_CreateTileElement_t createTileElement;
         OperationTileElement_ProgressPositionProp_t progressPositionProp;
         OperationTileElement_GetProgressHWND_t getProgressHWND;
         OperationTileElement_OnPropertyChanged_t onPropertyChanged;
         OperationTileElement_Destructor_t operationTileDestructor;
+        COperationStatusTile_UpdateRemainingItemsAndSize_t
+            updateRemainingItemsAndSize;
+        COperationStatusTile_UpdateSummary_t updateSummary;
     };
 
     bool ResolveSkinTargets(SkinTargets *targets)
@@ -1925,6 +2407,12 @@ namespace
             "?SetMargin@Element@DirectUI@@QEAAJHHHH@Z";
         constexpr PCSTR setPaddingSymbol =
             "?SetPadding@Element@DirectUI@@QEAAJHHHH@Z";
+        constexpr PCSTR setVisibleSymbol =
+            "?SetVisible@Element@DirectUI@@QEAAJ_N@Z";
+        constexpr PCSTR setRelPixHeightSymbol =
+            "?SetRelPixHeight@Element@DirectUI@@QEAAJH@Z";
+        constexpr PCSTR setContentStringSymbol =
+            "?SetContentString@Element@DirectUI@@QEAAJPEBG@Z";
         constexpr PCSTR getRootRelativeBoundsSymbol =
             "?GetRootRelativeBounds@Element@DirectUI@@QEAAJPEAUtagRECT@@@Z";
 
@@ -1954,6 +2442,14 @@ namespace
             GetProcAddress(dui70, setMarginSymbol));
         targets->setPadding = reinterpret_cast<Element_SetPadding_t>(
             GetProcAddress(dui70, setPaddingSymbol));
+        targets->setVisible = reinterpret_cast<Element_SetVisible_t>(
+            GetProcAddress(dui70, setVisibleSymbol));
+        targets->setRelPixHeight =
+            reinterpret_cast<Element_SetRelPixHeight_t>(
+                GetProcAddress(dui70, setRelPixHeightSymbol));
+        targets->setContentString =
+            reinterpret_cast<Element_SetContentString_t>(
+                GetProcAddress(dui70, setContentStringSymbol));
         targets->getRootRelativeBounds =
             reinterpret_cast<Element_GetRootRelativeBounds_t>(
                 GetProcAddress(dui70, getRootRelativeBoundsSymbol));
@@ -1963,13 +2459,16 @@ namespace
             !targets->setForegroundColor || !targets->setFontFace ||
             !targets->setFontSize || !targets->setFontWeight ||
             !targets->setRelPixWidth || !targets->setMargin ||
-            !targets->setPadding || !targets->getRootRelativeBounds)
+            !targets->setPadding || !targets->setVisible ||
+            !targets->setRelPixHeight || !targets->setContentString ||
+            !targets->getRootRelativeBounds)
         {
             Wh_Log(L"Skin setup failed: required dui70 exports missing "
                    L"ParserCreate=%p StrToID=%p FindDescendent=%p "
                    L"SetBackgroundColor=%p SetForegroundColor=%p "
                    L"SetFontFace=%p SetFontSize=%p SetFontWeight=%p "
                    L"SetRelPixWidth=%p SetMargin=%p SetPadding=%p "
+                   L"SetVisible=%p SetRelPixHeight=%p "
                    L"GetRootRelativeBounds=%p",
                    reinterpret_cast<void *>(targets->parserCreate),
                    reinterpret_cast<void *>(targets->strToID),
@@ -1982,6 +2481,8 @@ namespace
                    reinterpret_cast<void *>(targets->setRelPixWidth),
                    reinterpret_cast<void *>(targets->setMargin),
                    reinterpret_cast<void *>(targets->setPadding),
+                   reinterpret_cast<void *>(targets->setVisible),
+                   reinterpret_cast<void *>(targets->setRelPixHeight),
                    reinterpret_cast<void *>(targets->getRootRelativeBounds));
             return false;
         }
@@ -2027,6 +2528,18 @@ namespace
                 nullptr,
                 false,
             },
+            {
+                {LR"(?_UpdateRemainingItemsAndSize@COperationStatusTile@@AEAAJ_K000@Z)"},
+                &targets->updateRemainingItemsAndSize,
+                nullptr,
+                false,
+            },
+            {
+                {LR"(?_UpdateSummary@COperationStatusTile@@AEAAJPEBG@Z)"},
+                &targets->updateSummary,
+                nullptr,
+                false,
+            },
         };
 
         WH_HOOK_SYMBOLS_OPTIONS options{};
@@ -2037,7 +2550,8 @@ namespace
                                         ARRAYSIZE(shell32Symbols), &options) ||
             !targets->createTileElement || !targets->progressPositionProp ||
             !targets->getProgressHWND || !targets->onPropertyChanged ||
-            !targets->operationTileDestructor)
+            !targets->operationTileDestructor ||
+            !targets->updateRemainingItemsAndSize || !targets->updateSummary)
         {
             Wh_Log(L"Skin setup failed: unable to resolve exact "
                    L"file-operation symbols CreateTile=%p ProgressProp=%p "
@@ -2065,6 +2579,9 @@ namespace
         Element_SetRelPixWidth_Original = targets.setRelPixWidth;
         Element_SetMargin_Original = targets.setMargin;
         Element_SetPadding_Original = targets.setPadding;
+        Element_SetVisible_Original = targets.setVisible;
+        Element_SetRelPixHeight_Original = targets.setRelPixHeight;
+        Element_SetContentString_Original = targets.setContentString;
         Element_GetRootRelativeBounds_Original =
             targets.getRootRelativeBounds;
         OperationTileElement_ProgressPositionProp_Original =
@@ -2111,6 +2628,24 @@ namespace
             return false;
         }
 
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.updateRemainingItemsAndSize,
+                COperationStatusTile_UpdateRemainingItemsAndSize_Hook,
+                &COperationStatusTile_UpdateRemainingItemsAndSize_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook native byte update");
+            return false;
+        }
+
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.updateSummary,
+                COperationStatusTile_UpdateSummary_Hook,
+                &COperationStatusTile_UpdateSummary_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook native summary update");
+            return false;
+        }
+
         return true;
     }
 
@@ -2118,7 +2653,7 @@ namespace
 
 BOOL Wh_ModInit()
 {
-    Wh_Log(L"File Operation Styler 0.10.4 initialization started");
+    Wh_Log(L"File Operation Styler 0.10.13 initialization started");
 
     if (!InitializeProgressCircleUi())
     {
@@ -2132,13 +2667,17 @@ BOOL Wh_ModInit()
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 0.10.4 ready");
+    Wh_Log(L"File Operation Styler 0.10.13 ready");
     return TRUE;
 }
 
 void Wh_ModUninit()
 {
     ShutdownProgressCircleUi();
+    {
+        std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+        g_transferSummaries.clear();
+    }
     ClearSkinState();
-    Wh_Log(L"File Operation Styler 0.10.4 uninitialization complete");
+    Wh_Log(L"File Operation Styler 0.10.13 uninitialization complete");
 }
