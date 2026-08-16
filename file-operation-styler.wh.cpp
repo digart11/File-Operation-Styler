@@ -2,7 +2,7 @@
 // @id              file-operation-styler
 // @name            File Operation Styler
 // @description     Experimental dark skin for native file-operation tiles.
-// @version         0.10.17
+// @version         0.10.40
 // @author          digART
 // @license         GPL-3.0
 // @include         explorer.exe
@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cwchar>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -221,6 +222,19 @@ namespace
                                                     int bottom);
     Element_SetPadding_t Element_SetPadding_Original;
 
+    using Element_SetBorderColor_t = HRESULT(__cdecl *)(
+        DirectUI::Element *thisPtr,
+        COLORREF color);
+    Element_SetBorderColor_t Element_SetBorderColor_Original;
+
+    using Element_SetBorderThickness_t = HRESULT(__cdecl *)(
+        DirectUI::Element *thisPtr,
+        int left,
+        int top,
+        int right,
+        int bottom);
+    Element_SetBorderThickness_t Element_SetBorderThickness_Original;
+
     using Element_SetVisible_t = HRESULT(__cdecl *)(
         DirectUI::Element *thisPtr,
         bool visible);
@@ -281,6 +295,12 @@ namespace
         PCWSTR summary);
     COperationStatusTile_UpdateSummary_t COperationStatusTile_UpdateSummary_Original;
 
+    using COperationStatusTile_SetTileDisplayMode_t = HRESULT(__cdecl *)(
+        COperationStatusTile *thisPtr,
+        bool expanded);
+    COperationStatusTile_SetTileDisplayMode_t
+        COperationStatusTile_SetTileDisplayMode_Original;
+
     struct TransferSummaryState
     {
         COperationStatusTile *owner;
@@ -291,30 +311,106 @@ namespace
         unsigned long long totalBytes;
         bool bytesValid;
         std::wstring nativeSummary;
+        bool displayModeKnown;
+        bool expanded;
     };
 
     std::mutex g_transferSummaryMutex;
     std::vector<TransferSummaryState> g_transferSummaries;
 
-    constexpr COLORREF kBackgroundColor = RGB(16, 21, 28);
+    constexpr COLORREF kBackgroundColor = RGB(44, 44, 44);
     constexpr COLORREF kPrimaryTextColor = RGB(242, 244, 247);
     constexpr COLORREF kSecondaryTextColor = RGB(154, 163, 174);
-    constexpr int kRequestedTileWidth = 548;
-    constexpr int kReservedLeftWidth = 152;
-    constexpr int kContentTopPadding = 5;
-    constexpr int kContentRightPadding = 12;
-    constexpr int kContentBottomPadding = 5;
-    constexpr int kTileVerticalMargin = 4;
-    constexpr int kCircleColumnWidth = 152;
-    constexpr int kCircleWindowHeight = 144;
-    constexpr int kCircleDiameter = 120;
-    constexpr int kCircleTop = 8;
-    constexpr int kCircleStrokeWidth = 6;
+    constexpr int kRequestedTileWidth = 550;
+    constexpr int kReservedLeftWidth = 156;
+    constexpr int kContentTopPadding = 4;
+    constexpr int kContentRightPadding = 10;
+    constexpr int kContentBottomPadding = 4;
+    constexpr int kTileVerticalMargin = 0;
+    constexpr int kCircleColumnWidth = 156;
+    constexpr int kCircleWindowHeight = 130;
+    constexpr int kCircleDiameter = 118;
+    constexpr int kCircleTop = 4;
+    // Keep the proven ring geometry. The right-side layout is being tightened
+    // independently so the graph can remain useful without making the whole
+    // window excessively wide.
+    constexpr int kCircleHostY = 4;
+    constexpr int kCircleStrokeWidth = 7;
     constexpr COLORREF kInactiveRingColor = RGB(58, 65, 74);
     constexpr COLORREF kAccentRingColor = RGB(21, 151, 229);
-    constexpr COLORREF kGraphSurfaceColor = RGB(23, 29, 37);
-    constexpr int kGraphHeight = 48;
-    constexpr int kChartAreaHeight = 56;
+    constexpr COLORREF kGraphSurfaceColor = RGB(36, 40, 46);
+    constexpr COLORREF kActionSurfaceColor = RGB(52, 57, 64);
+
+    // Windows 11 DWM attributes. Resolve DwmSetWindowAttribute dynamically so
+    // the mod doesn't need an additional import library. Making the caption
+    // use the same color as the client area removes the stock gray "tab"
+    // look and makes OperationStatusWindow read as one continuous card.
+    constexpr DWORD kDwmwaUseImmersiveDarkMode = 20;
+    constexpr DWORD kDwmwaBorderColor = 34;
+    constexpr DWORD kDwmwaCaptionColor = 35;
+    constexpr DWORD kDwmwaTextColor = 36;
+    constexpr COLORREF kDwmColorDefault = 0xFFFFFFFF;
+
+    using DwmSetWindowAttribute_t = HRESULT(WINAPI *)(
+        HWND hwnd, DWORD attribute, LPCVOID value, DWORD valueSize);
+
+    DwmSetWindowAttribute_t GetDwmSetWindowAttribute()
+    {
+        static DwmSetWindowAttribute_t function = []() -> DwmSetWindowAttribute_t
+        {
+            HMODULE module = LoadLibraryExW(
+                L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if (!module)
+            {
+                return nullptr;
+            }
+            return reinterpret_cast<DwmSetWindowAttribute_t>(
+                GetProcAddress(module, "DwmSetWindowAttribute"));
+        }();
+        return function;
+    }
+
+    void ApplyUnifiedHostChrome(HWND hostWindow)
+    {
+        DwmSetWindowAttribute_t setAttribute = GetDwmSetWindowAttribute();
+        if (!setAttribute || !hostWindow || !IsWindow(hostWindow))
+        {
+            return;
+        }
+
+        BOOL darkMode = TRUE;
+        COLORREF captionColor = kBackgroundColor;
+        COLORREF textColor = kPrimaryTextColor;
+        COLORREF borderColor = kInactiveRingColor;
+        setAttribute(hostWindow, kDwmwaUseImmersiveDarkMode,
+                     &darkMode, sizeof(darkMode));
+        setAttribute(hostWindow, kDwmwaCaptionColor,
+                     &captionColor, sizeof(captionColor));
+        setAttribute(hostWindow, kDwmwaTextColor,
+                     &textColor, sizeof(textColor));
+        setAttribute(hostWindow, kDwmwaBorderColor,
+                     &borderColor, sizeof(borderColor));
+    }
+
+    void ResetUnifiedHostChrome(HWND hostWindow)
+    {
+        DwmSetWindowAttribute_t setAttribute = GetDwmSetWindowAttribute();
+        if (!setAttribute || !hostWindow || !IsWindow(hostWindow))
+        {
+            return;
+        }
+
+        COLORREF defaultColor = kDwmColorDefault;
+        setAttribute(hostWindow, kDwmwaCaptionColor,
+                     &defaultColor, sizeof(defaultColor));
+        setAttribute(hostWindow, kDwmwaTextColor,
+                     &defaultColor, sizeof(defaultColor));
+        setAttribute(hostWindow, kDwmwaBorderColor,
+                     &defaultColor, sizeof(defaultColor));
+    }
+
+    constexpr int kGraphHeight = 52;
+    constexpr int kChartAreaHeight = 60;
     constexpr wchar_t kCircleWindowClass[] =
         L"Windhawk.FileOperationStyler.ProgressCircle.0.10.3";
     constexpr UINT_PTR kHostWindowSubclassId = 0xF0510010;
@@ -569,11 +665,11 @@ namespace
         wsprintfW(percentageText, L"%d%%", displayProgress);
         Gdiplus::Font percentageFont(
             L"Segoe UI Variable Display",
-            static_cast<Gdiplus::REAL>(ScaleForDpi(28, dpi)),
+            static_cast<Gdiplus::REAL>(ScaleForDpi(31, dpi)),
             Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::Font percentageFallback(
             L"Segoe UI",
-            static_cast<Gdiplus::REAL>(ScaleForDpi(28, dpi)),
+            static_cast<Gdiplus::REAL>(ScaleForDpi(31, dpi)),
             Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::Font labelFont(
             L"Segoe UI Variable",
@@ -801,6 +897,83 @@ namespace
         }
     }
 
+    int GetSingleCirclePercentForHost(HWND hostWindow)
+    {
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        int percent = -1;
+        int matches = 0;
+        for (auto const &state : g_circles)
+        {
+            if (state.hostWindow != hostWindow)
+            {
+                continue;
+            }
+            percent = std::clamp(state.progressPercent, 0, 100);
+            ++matches;
+            if (matches > 1)
+            {
+                return -1;
+            }
+        }
+        return matches == 1 ? percent : -1;
+    }
+
+    bool LooksLikeNativeProgressCaption(PCWSTR text)
+    {
+        return text && *text && wcsstr(text, L"%") != nullptr &&
+               wcsstr(text, L" / ") == nullptr;
+    }
+
+    bool LooksLikeTransferSummaryCaption(PCWSTR text)
+    {
+        if (!text || !*text)
+        {
+            return false;
+        }
+
+        // The custom body summary is a transferred/total pair. Explorer can
+        // mirror either the full "x / y (p%)" form or a transient "x / y"
+        // form into the top-level caption. Suppress both so the title remains
+        // Explorer's native progress caption instead of flashing byte counts.
+        return wcsstr(text, L" / ") != nullptr;
+    }
+
+    void SyncHostCaptionFromCircle(OperationTileElement *tile, int percent)
+    {
+        HWND hostWindow = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto it = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [tile](CircleState const &state)
+                { return state.tile == tile; });
+            if (it != g_circles.end())
+            {
+                hostWindow = it->hostWindow;
+            }
+        }
+
+        if (!hostWindow || !IsWindow(hostWindow) ||
+            GetSingleCirclePercentForHost(hostWindow) < 0)
+        {
+            return;
+        }
+
+        wchar_t currentCaption[160]{};
+        GetWindowTextW(hostWindow, currentCaption, ARRAYSIZE(currentCaption));
+        if (!LooksLikeNativeProgressCaption(currentCaption))
+        {
+            return;
+        }
+
+        wchar_t synchronizedCaption[80]{};
+        bool paused = wcsstr(currentCaption, L"Paused") != nullptr;
+        wsprintfW(synchronizedCaption,
+                  paused ? L"Paused - %d%% complete" : L"%d%% complete",
+                  std::clamp(percent, 0, 100));
+        SetWindowTextW(hostWindow, synchronizedCaption);
+    }
+
     LRESULT CALLBACK OperationStatusWindowSubclassProc(
         HWND window,
         UINT message,
@@ -809,6 +982,33 @@ namespace
         UINT_PTR subclassId,
         DWORD_PTR)
     {
+        if (message == WM_SETTEXT)
+        {
+            PCWSTR caption = reinterpret_cast<PCWSTR>(lParam);
+            if (LooksLikeTransferSummaryCaption(caption))
+            {
+                // Keep transferred/total in the body only.
+                return TRUE;
+            }
+
+            // With one operation tile, keep the title percentage synchronized
+            // to the same normalized progress used by the circle/body. Explorer
+            // can otherwise publish a visibly different percentage. For
+            // multi-tile hosts, leave Explorer's aggregate caption untouched.
+            int percent = GetSingleCirclePercentForHost(window);
+            if (percent >= 0 && LooksLikeNativeProgressCaption(caption))
+            {
+                wchar_t synchronizedCaption[80]{};
+                bool paused = wcsstr(caption, L"Paused") != nullptr;
+                wsprintfW(synchronizedCaption,
+                          paused ? L"Paused - %d%% complete"
+                                 : L"%d%% complete",
+                          percent);
+                return DefSubclassProc(window, message, wParam,
+                                       reinterpret_cast<LPARAM>(synchronizedCaption));
+            }
+        }
+
         if (message == g_removeHostSubclassMessage)
         {
             RemoveHostSubclassRecord(window);
@@ -927,15 +1127,29 @@ namespace
 
         *width = ScaleForDpi(kCircleColumnWidth, dpi);
         *height = ScaleForDpi(kCircleWindowHeight, dpi);
+        auto *tileRoot =
+            reinterpret_cast<DirectUI::Element *>(state.tile);
+
+        // Use an explicit host-relative target position. Earlier attempts
+        // derived Y from DirectUI bounds, but those bounds did not produce a
+        // visible movement in Explorer. Keep a real tile-bounds fallback for
+        // unusual hosts, but make the normal presentation deterministic.
+        *x = 0;
+        *y = ScaleForDpi(kCircleHostY, dpi);
+        if (IsWindow(state.hostWindow))
+        {
+            return true;
+        }
+
         RECT tileBounds{};
         HRESULT boundsResult = Element_GetRootRelativeBounds_Original(
-            reinterpret_cast<DirectUI::Element *>(state.tile), &tileBounds);
+            tileRoot, &tileBounds);
         if (SUCCEEDED(boundsResult) && tileBounds.bottom > tileBounds.top)
         {
             *x = std::max(static_cast<int>(tileBounds.left), 0);
-            *y = std::max(static_cast<int>(tileBounds.top) +
-                              ScaleForDpi(8, dpi),
-                          ScaleForDpi(40, dpi));
+            *y = std::max(static_cast<int>(tileBounds.top) -
+                              ScaleForDpi(28, dpi),
+                          ScaleForDpi(34, dpi));
             return true;
         }
 
@@ -978,6 +1192,15 @@ namespace
         if (latestProgressWindow && !IsWindow(latestProgressWindow))
         {
             latestProgressWindow = nullptr;
+        }
+
+        // The ring is the visible progress indicator. Keep Explorer's native
+        // progress HWND alive as the authoritative PBM progress source, but
+        // hide the HWND itself so its residual strip cannot bleed through the
+        // custom composition. This no longer controls circle visibility.
+        if (latestProgressWindow && IsWindowVisible(latestProgressWindow))
+        {
+            ShowWindow(latestProgressWindow, SW_HIDE);
         }
 
         HWND progressWindowToSubclass = nullptr;
@@ -1136,6 +1359,8 @@ namespace
 
     bool EnsureHostSubclass(HWND hostWindow, unsigned long long eventId)
     {
+        ApplyUnifiedHostChrome(hostWindow);
+
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
             if (std::find(g_subclassedHosts.begin(), g_subclassedHosts.end(),
@@ -1185,27 +1410,36 @@ namespace
         return it != g_circles.end() ? it->progressPercent : -1;
     }
 
+    void ApplyDisplayMode(COperationStatusTile *owner);
+
     void RegisterTransferSummary(COperationStatusTile *owner,
                                  OperationTileElement *tile,
                                  DirectUI::Element *operationTileRoot,
                                  DirectUI::Element *tileHeaderRoot)
     {
-        std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
-        auto it = std::find_if(
-            g_transferSummaries.begin(), g_transferSummaries.end(),
-            [owner](TransferSummaryState const &state)
-            { return state.owner == owner; });
-        if (it == g_transferSummaries.end())
         {
-            g_transferSummaries.push_back(
-                {owner, tile, operationTileRoot, tileHeaderRoot, 0, 0, false, {}});
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner](TransferSummaryState const &state)
+                { return state.owner == owner; });
+            if (it == g_transferSummaries.end())
+            {
+                g_transferSummaries.push_back(
+                    {owner, tile, operationTileRoot, tileHeaderRoot, 0, 0, false, {}, false, false});
+            }
+            else
+            {
+                it->tile = tile;
+                it->operationTileRoot = operationTileRoot;
+                it->tileHeaderRoot = tileHeaderRoot;
+            }
         }
-        else
-        {
-            it->tile = tile;
-            it->operationTileRoot = operationTileRoot;
-            it->tileHeaderRoot = tileHeaderRoot;
-        }
+
+        // SetTileDisplayMode can run during construction before the tile root
+        // is registered with the mod. Reapply the remembered native mode now
+        // that the DirectUI descendants are available.
+        ApplyDisplayMode(owner);
     }
 
     void RemoveTransferSummary(OperationTileElement *tile)
@@ -1268,20 +1502,82 @@ namespace
 
         Element_SetContentString_Original(summary, combinedText);
 
-        // SetContentString on eltSummary can also influence the top-level
-        // caption. Put Explorer's own summary text back into the window title
-        // so only the body line becomes transferred/total/percent.
-        if (!state.nativeSummary.empty())
+        // OperationStatusWindowSubclassProc suppresses the synthetic
+        // transferred/total caption update, so Explorer's native title remains
+        // stable while eltSummary keeps the custom body text.
+    }
+
+    void ApplyDisplayMode(COperationStatusTile *owner)
+    {
+        TransferSummaryState state{};
         {
-            HWND progressWindow =
-                OperationTileElement_GetProgressHWND_Original(state.tile);
-            HWND hostWindow =
-                GetOperationStatusWindowForTile(progressWindow, 0);
-            if (hostWindow)
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner](TransferSummaryState const &candidate)
+                { return candidate.owner == owner; });
+            if (it == g_transferSummaries.end() || !it->displayModeKnown ||
+                !it->operationTileRoot)
             {
-                SetWindowTextW(hostWindow, state.nativeSummary.c_str());
+                return;
+            }
+            state = *it;
+        }
+
+        DirectUI::Element *progressBar = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltProgressBar", false);
+        DirectUI::Element *chartArea = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltChartArea", false);
+        DirectUI::Element *rateChart = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltRateChart_New", false);
+
+        // Keep the two presentations mutually exclusive. Explorer's expanded
+        // mode gets the speed-history graph; compact mode gets the straight
+        // progress bar. This also removes the useless black bar that was
+        // showing underneath the graph when both presentations were visible.
+        if (progressBar)
+        {
+            Element_SetVisible_Original(progressBar, !state.expanded);
+        }
+        if (chartArea)
+        {
+            Element_SetVisible_Original(chartArea, state.expanded);
+        }
+        if (rateChart)
+        {
+            Element_SetVisible_Original(rateChart, state.expanded);
+        }
+
+        Wh_Log(L"display-mode owner=%p expanded=%s chart=%s progressBar=%s",
+               reinterpret_cast<void *>(owner),
+               state.expanded ? L"yes" : L"no",
+               state.expanded ? L"visible" : L"hidden",
+               state.expanded ? L"hidden" : L"visible");
+    }
+
+    void RecordDisplayMode(COperationStatusTile *owner, bool expanded)
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner](TransferSummaryState const &state)
+                { return state.owner == owner; });
+            if (it == g_transferSummaries.end())
+            {
+                g_transferSummaries.push_back(
+                    {owner, nullptr, nullptr, nullptr, 0, 0, false, {}, true, expanded});
+            }
+            else
+            {
+                it->displayModeKnown = true;
+                it->expanded = expanded;
             }
         }
+        ApplyDisplayMode(owner);
     }
 
     void RecordTransferBytes(COperationStatusTile *owner,
@@ -1462,7 +1758,12 @@ namespace
             if (repaintNeeded && existingCircleWindow &&
                 IsWindow(existingCircleWindow))
             {
-                InvalidateRect(existingCircleWindow, nullptr, FALSE);
+                // Percent changes are infrequent (at most 100 visible steps).
+                // Paint the already-buffered circle immediately so the ring
+                // doesn't sit one percentage point behind Explorer's title/body
+                // text while a fast NVMe copy is advancing quickly.
+                RedrawWindow(existingCircleWindow, nullptr, nullptr,
+                             RDW_INVALIDATE | RDW_UPDATENOW);
             }
             return true;
         }
@@ -1539,6 +1840,7 @@ namespace
             ReadNativeProgress(progressWindow, fallbackPercent);
         EnsureProgressCircle(tile, 0, progress);
         RefreshTransferSummaryForTile(tile);
+        SyncHostCaptionFromCircle(tile, progress.percent);
     }
 
     void DestroyProgressCircle(OperationTileElement *tile)
@@ -1626,6 +1928,7 @@ namespace
             {
                 continue;
             }
+            ResetUnifiedHostChrome(hostWindow);
             DWORD windowThread =
                 GetWindowThreadProcessId(hostWindow, nullptr);
             if (windowThread == GetCurrentThreadId())
@@ -1798,6 +2101,19 @@ namespace
         if (SUCCEEDED(result))
         {
             RecordNativeSummary(thisPtr, summary);
+        }
+        return result;
+    }
+
+    HRESULT __cdecl COperationStatusTile_SetTileDisplayMode_Hook(
+        COperationStatusTile *thisPtr,
+        bool expanded)
+    {
+        HRESULT result = COperationStatusTile_SetTileDisplayMode_Original(
+            thisPtr, expanded);
+        if (SUCCEEDED(result))
+        {
+            RecordDisplayMode(thisPtr, expanded);
         }
         return result;
     }
@@ -2056,6 +2372,35 @@ namespace
                              backgroundResult);
         }
 
+        // The circle already paints kBackgroundColor. The remaining visible
+        // gray seam comes from the native parent/header surfaces rather than
+        // circle geometry, so color those known surfaces instead of changing
+        // the circle placement again.
+        if (parentElement)
+        {
+            HRESULT parentBackgroundResult =
+                Element_SetBackgroundColor_Original(parentElement,
+                                                    kBackgroundColor);
+            if (FAILED(parentBackgroundResult))
+            {
+                LogSetterFailure(eventId, L"parentElement",
+                                 L"background-surface",
+                                 parentBackgroundResult);
+            }
+        }
+        if (state.tileHeaderRoot)
+        {
+            HRESULT headerBackgroundResult =
+                Element_SetBackgroundColor_Original(state.tileHeaderRoot,
+                                                    kBackgroundColor);
+            if (FAILED(headerBackgroundResult))
+            {
+                LogSetterFailure(eventId, L"idTileHeader",
+                                 L"background-surface",
+                                 headerBackgroundResult);
+            }
+        }
+
         ApplyBaseLayout(eventId, parentElement, operationTileRoot,
                         state.tileHeaderRoot);
 
@@ -2094,7 +2439,7 @@ namespace
             allFontsApplied = SUCCEEDED(fontFaceResult);
 
             HRESULT fontSizeResult =
-                Element_SetFontSize_Original(summary, 24);
+                Element_SetFontSize_Original(summary, 26);
             if (FAILED(fontSizeResult))
             {
                 LogSetterFailure(eventId, L"eltSummary", L"font-size",
@@ -2110,7 +2455,7 @@ namespace
             }
 
             HRESULT marginResult =
-                Element_SetMargin_Original(summary, 0, 2, 0, 5);
+                Element_SetMargin_Original(summary, 0, 6, 0, 8);
             if (FAILED(marginResult))
             {
                 LogSetterFailure(eventId, L"eltSummary", L"margin",
@@ -2199,7 +2544,7 @@ namespace
                                  colorResult);
             }
 
-            HRESULT sizeResult = Element_SetFontSize_Original(element, 17);
+            HRESULT sizeResult = Element_SetFontSize_Original(element, 15);
             if (FAILED(sizeResult))
             {
                 LogSetterFailure(eventId, target.name, L"font-size-header",
@@ -2212,6 +2557,46 @@ namespace
                 LogSetterFailure(eventId, target.name, L"font-weight-header",
                                  weightResult);
             }
+        }
+
+        // Unify the native tile surfaces so the custom circle and the
+        // DirectUI content read as one intentional dark card instead of
+        // separate Windows-gray panels. Parentage/order remain untouched.
+        for (PCWSTR name : {L"eltTileContents", L"eltRegularTile",
+                            L"eltRegularTileHeader", L"eltDetails"})
+        {
+            DirectUI::Element *element = FindSkinElement(
+                operationTileRoot, state.tileHeaderRoot, name, false);
+            if (!element)
+            {
+                continue;
+            }
+
+            HRESULT surfaceResult =
+                Element_SetBackgroundColor_Original(element, kBackgroundColor);
+            if (FAILED(surfaceResult))
+            {
+                LogSetterFailure(eventId, name, L"background-surface",
+                                 surfaceResult);
+            }
+        }
+
+        // Remove DirectUI frame edges from the known body/chart surfaces.
+        // This specifically targets the stray horizontal separator and the
+        // bright chart-edge artifacts without changing parentage or order.
+        for (DirectUI::Element *element : {operationTileRoot,
+                                           FindSkinElement(operationTileRoot, state.tileHeaderRoot, L"eltTileContents", false),
+                                           FindSkinElement(operationTileRoot, state.tileHeaderRoot, L"eltRegularTile", false),
+                                           FindSkinElement(operationTileRoot, state.tileHeaderRoot, L"eltDetails", false),
+                                           FindSkinElement(operationTileRoot, state.tileHeaderRoot, L"eltChartArea", false),
+                                           FindSkinElement(operationTileRoot, state.tileHeaderRoot, L"eltRateChart_New", false)})
+        {
+            if (!element)
+            {
+                continue;
+            }
+            Element_SetBorderColor_Original(element, kBackgroundColor);
+            Element_SetBorderThickness_Original(element, 0, 0, 0, 0);
         }
 
         // Deliberate visual pass using only verified native DirectUI
@@ -2243,7 +2628,7 @@ namespace
             HRESULT heightResult = Element_SetRelPixHeight_Original(
                 chartArea, kChartAreaHeight);
             HRESULT marginResult =
-                Element_SetMargin_Original(chartArea, 0, 4, 0, 4);
+                Element_SetMargin_Original(chartArea, 0, 4, 0, 3);
             if (FAILED(backgroundResult))
             {
                 LogSetterFailure(eventId, L"eltChartArea", L"background",
@@ -2290,6 +2675,58 @@ namespace
             }
         }
 
+        // Let Explorer keep its native compact/expanded presentation switch:
+        // compact mode uses eltProgressBar, while expanded mode uses the
+        // details/chart presentation. Do not force visibility in either mode.
+        // We only style the compact linear bar so it can act as the secondary
+        // progress indicator beneath the circle, matching the target layout.
+        DirectUI::Element *progressBar = FindSkinElement(
+            operationTileRoot, state.tileHeaderRoot, L"eltProgressBar", false);
+        if (progressBar)
+        {
+            HRESULT heightResult =
+                Element_SetRelPixHeight_Original(progressBar, 8);
+            HRESULT marginResult =
+                Element_SetMargin_Original(progressBar, 0, 10, 0, 6);
+            if (FAILED(heightResult))
+            {
+                LogSetterFailure(eventId, L"eltProgressBar",
+                                 L"relative-pixel-height=8", heightResult);
+            }
+            if (FAILED(marginResult))
+            {
+                LogSetterFailure(eventId, L"eltProgressBar",
+                                 L"compact-target-margin", marginResult);
+            }
+        }
+
+        // Keep the expanded details group compact. Explorer still owns the
+        // compact/expanded visibility switch; this only tightens the expanded
+        // graph + detail rows when More details is active.
+        DirectUI::Element *details = FindSkinElement(
+            operationTileRoot, state.tileHeaderRoot, L"eltDetails", false);
+        if (details)
+        {
+            HRESULT paddingResult =
+                Element_SetPadding_Original(details, 0, 0, 0, 0);
+            HRESULT marginResult =
+                Element_SetMargin_Original(details, 0, 0, 0, 0);
+            if (FAILED(paddingResult))
+            {
+                LogSetterFailure(eventId, L"eltDetails",
+                                 L"padding=0", paddingResult);
+            }
+            if (FAILED(marginResult))
+            {
+                LogSetterFailure(eventId, L"eltDetails",
+                                 L"margin=0", marginResult);
+            }
+        }
+
+        // Keep Explorer's descriptive labels intact. The target uses plain
+        // language (for example "Time remaining") rather than terse "ETA"
+        // labels, and retaining native wording also behaves better across states.
+
         struct DetailTarget
         {
             PCWSTR name;
@@ -2298,10 +2735,10 @@ namespace
             int weight;
         };
         constexpr DetailTarget detailTargets[] = {
-            {L"eltTimeRemainingLabel", kSecondaryTextColor, 16, 400},
-            {L"eltTimeRemaining", kPrimaryTextColor, 16, 500},
-            {L"eltItemsRemainingLabel", kSecondaryTextColor, 16, 400},
-            {L"eltItemsRemaining", kPrimaryTextColor, 16, 500},
+            {L"eltTimeRemainingLabel", kSecondaryTextColor, 14, 400},
+            {L"eltTimeRemaining", kPrimaryTextColor, 14, 500},
+            {L"eltItemsRemainingLabel", kSecondaryTextColor, 14, 400},
+            {L"eltItemsRemaining", kPrimaryTextColor, 14, 500},
         };
 
         for (auto const &target : detailTargets)
@@ -2325,7 +2762,7 @@ namespace
                 lstrcmpW(target.name, L"eltTimeRemainingLabel") == 0 ||
                 lstrcmpW(target.name, L"eltItemsRemainingLabel") == 0;
             HRESULT marginResult = Element_SetMargin_Original(
-                element, 0, 1, isLabel ? 10 : 0, 2);
+                element, 0, 0, isLabel ? 12 : 0, 3);
 
             if (FAILED(foregroundResult))
                 LogSetterFailure(eventId, target.name,
@@ -2354,8 +2791,8 @@ namespace
             int leftMargin;
         };
         constexpr ActionControlTarget actionControlTargets[] = {
-            {L"eltPauseButton", kAccentRingColor, 18, 8},
-            {L"eltCancelButton", kSecondaryTextColor, 18, 10},
+            {L"eltPauseButton", kAccentRingColor, 17, 6},
+            {L"eltCancelButton", kSecondaryTextColor, 17, 8},
         };
 
         for (auto const &target : actionControlTargets)
@@ -2369,18 +2806,25 @@ namespace
 
             HRESULT foregroundResult =
                 Element_SetForegroundColor_Original(element, target.color);
+            HRESULT backgroundResult =
+                Element_SetBackgroundColor_Original(element, kActionSurfaceColor);
             HRESULT faceResult = Element_SetFontFace_Original(
                 element, L"Segoe UI Variable");
             HRESULT sizeResult =
                 Element_SetFontSize_Original(element, target.size);
             HRESULT weightResult =
                 Element_SetFontWeight_Original(element, 500);
+            HRESULT paddingResult = Element_SetPadding_Original(
+                element, 8, 4, 8, 4);
             HRESULT marginResult = Element_SetMargin_Original(
-                element, target.leftMargin, 0, 2, 0);
+                element, target.leftMargin, 0, 3, 0);
 
             if (FAILED(foregroundResult))
                 LogSetterFailure(eventId, target.name,
                                  L"foreground-action", foregroundResult);
+            if (FAILED(backgroundResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"background-action", backgroundResult);
             if (FAILED(faceResult))
                 LogSetterFailure(eventId, target.name,
                                  L"font-face-action", faceResult);
@@ -2390,6 +2834,9 @@ namespace
             if (FAILED(weightResult))
                 LogSetterFailure(eventId, target.name,
                                  L"font-weight-action", weightResult);
+            if (FAILED(paddingResult))
+                LogSetterFailure(eventId, target.name,
+                                 L"padding-action", paddingResult);
             if (FAILED(marginResult))
                 LogSetterFailure(eventId, target.name,
                                  L"margin-action", marginResult);
@@ -2420,6 +2867,8 @@ namespace
         Element_SetRelPixWidth_t setRelPixWidth;
         Element_SetMargin_t setMargin;
         Element_SetPadding_t setPadding;
+        Element_SetBorderColor_t setBorderColor;
+        Element_SetBorderThickness_t setBorderThickness;
         Element_SetVisible_t setVisible;
         Element_SetRelPixHeight_t setRelPixHeight;
         Element_SetContentString_t setContentString;
@@ -2432,6 +2881,7 @@ namespace
         COperationStatusTile_UpdateRemainingItemsAndSize_t
             updateRemainingItemsAndSize;
         COperationStatusTile_UpdateSummary_t updateSummary;
+        COperationStatusTile_SetTileDisplayMode_t setTileDisplayMode;
     };
 
     bool ResolveSkinTargets(SkinTargets *targets)
@@ -2466,6 +2916,10 @@ namespace
             "?SetMargin@Element@DirectUI@@QEAAJHHHH@Z";
         constexpr PCSTR setPaddingSymbol =
             "?SetPadding@Element@DirectUI@@QEAAJHHHH@Z";
+        constexpr PCSTR setBorderColorSymbol =
+            "?SetBorderColor@Element@DirectUI@@QEAAJK@Z";
+        constexpr PCSTR setBorderThicknessSymbol =
+            "?SetBorderThickness@Element@DirectUI@@QEAAJHHHH@Z";
         constexpr PCSTR setVisibleSymbol =
             "?SetVisible@Element@DirectUI@@QEAAJ_N@Z";
         constexpr PCSTR setRelPixHeightSymbol =
@@ -2501,6 +2955,10 @@ namespace
             GetProcAddress(dui70, setMarginSymbol));
         targets->setPadding = reinterpret_cast<Element_SetPadding_t>(
             GetProcAddress(dui70, setPaddingSymbol));
+        targets->setBorderColor = reinterpret_cast<Element_SetBorderColor_t>(
+            GetProcAddress(dui70, setBorderColorSymbol));
+        targets->setBorderThickness = reinterpret_cast<Element_SetBorderThickness_t>(
+            GetProcAddress(dui70, setBorderThicknessSymbol));
         targets->setVisible = reinterpret_cast<Element_SetVisible_t>(
             GetProcAddress(dui70, setVisibleSymbol));
         targets->setRelPixHeight =
@@ -2518,7 +2976,8 @@ namespace
             !targets->setForegroundColor || !targets->setFontFace ||
             !targets->setFontSize || !targets->setFontWeight ||
             !targets->setRelPixWidth || !targets->setMargin ||
-            !targets->setPadding || !targets->setVisible ||
+            !targets->setPadding || !targets->setBorderColor ||
+            !targets->setBorderThickness || !targets->setVisible ||
             !targets->setRelPixHeight || !targets->setContentString ||
             !targets->getRootRelativeBounds)
         {
@@ -2527,6 +2986,7 @@ namespace
                    L"SetBackgroundColor=%p SetForegroundColor=%p "
                    L"SetFontFace=%p SetFontSize=%p SetFontWeight=%p "
                    L"SetRelPixWidth=%p SetMargin=%p SetPadding=%p "
+                   L"SetBorderColor=%p SetBorderThickness=%p "
                    L"SetVisible=%p SetRelPixHeight=%p "
                    L"GetRootRelativeBounds=%p",
                    reinterpret_cast<void *>(targets->parserCreate),
@@ -2540,6 +3000,8 @@ namespace
                    reinterpret_cast<void *>(targets->setRelPixWidth),
                    reinterpret_cast<void *>(targets->setMargin),
                    reinterpret_cast<void *>(targets->setPadding),
+                   reinterpret_cast<void *>(targets->setBorderColor),
+                   reinterpret_cast<void *>(targets->setBorderThickness),
                    reinterpret_cast<void *>(targets->setVisible),
                    reinterpret_cast<void *>(targets->setRelPixHeight),
                    reinterpret_cast<void *>(targets->getRootRelativeBounds));
@@ -2599,6 +3061,12 @@ namespace
                 nullptr,
                 false,
             },
+            {
+                {LR"(?SetTileDisplayMode@COperationStatusTile@@UEAAJ_N@Z)"},
+                &targets->setTileDisplayMode,
+                nullptr,
+                false,
+            },
         };
 
         WH_HOOK_SYMBOLS_OPTIONS options{};
@@ -2610,7 +3078,8 @@ namespace
             !targets->createTileElement || !targets->progressPositionProp ||
             !targets->getProgressHWND || !targets->onPropertyChanged ||
             !targets->operationTileDestructor ||
-            !targets->updateRemainingItemsAndSize || !targets->updateSummary)
+            !targets->updateRemainingItemsAndSize || !targets->updateSummary ||
+            !targets->setTileDisplayMode)
         {
             Wh_Log(L"Skin setup failed: unable to resolve exact "
                    L"file-operation symbols CreateTile=%p ProgressProp=%p "
@@ -2638,6 +3107,8 @@ namespace
         Element_SetRelPixWidth_Original = targets.setRelPixWidth;
         Element_SetMargin_Original = targets.setMargin;
         Element_SetPadding_Original = targets.setPadding;
+        Element_SetBorderColor_Original = targets.setBorderColor;
+        Element_SetBorderThickness_Original = targets.setBorderThickness;
         Element_SetVisible_Original = targets.setVisible;
         Element_SetRelPixHeight_Original = targets.setRelPixHeight;
         Element_SetContentString_Original = targets.setContentString;
@@ -2705,6 +3176,15 @@ namespace
             return false;
         }
 
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.setTileDisplayMode,
+                COperationStatusTile_SetTileDisplayMode_Hook,
+                &COperationStatusTile_SetTileDisplayMode_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook native display mode");
+            return false;
+        }
+
         return true;
     }
 
@@ -2712,7 +3192,7 @@ namespace
 
 BOOL Wh_ModInit()
 {
-    Wh_Log(L"File Operation Styler 0.10.17 initialization started");
+    Wh_Log(L"File Operation Styler 0.10.40 initialization started");
 
     if (!InitializeProgressCircleUi())
     {
@@ -2726,7 +3206,7 @@ BOOL Wh_ModInit()
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 0.10.17 ready");
+    Wh_Log(L"File Operation Styler 0.10.40 ready");
     return TRUE;
 }
 
@@ -2738,5 +3218,5 @@ void Wh_ModUninit()
         g_transferSummaries.clear();
     }
     ClearSkinState();
-    Wh_Log(L"File Operation Styler 0.10.17 uninitialization complete");
+    Wh_Log(L"File Operation Styler 0.10.40 uninitialization complete");
 }
