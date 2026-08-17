@@ -2,7 +2,7 @@
 // @id              file-operation-styler
 // @name            File Operation Styler
 // @description     Experimental dark skin for native file-operation tiles.
-// @version         0.10.40
+// @version         0.10.41
 // @author          digART
 // @license         GPL-3.0
 // @include         explorer.exe
@@ -23,12 +23,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cwchar>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
 
 struct COperationStatusTile;
+struct COperationStatusTileRateCalculator;
 struct OperationTileElement;
 
 namespace DirectUI
@@ -56,6 +59,7 @@ namespace
 
     thread_local SkinState g_skinState{};
     std::atomic<unsigned long long> g_skinEventSequence{};
+    std::atomic<unsigned long long> g_displayTransitionSequence{};
 
     void ClearSkinState()
     {
@@ -175,6 +179,11 @@ namespace
                                                                     unsigned short id);
     Element_FindDescendent_t Element_FindDescendent_Original;
 
+    // Verified dui70.dll export:
+    // ?GetParent@Element@DirectUI@@QEAAPEAV12@XZ
+    using Element_GetParent_t = DirectUI::Element *(__cdecl *)(DirectUI::Element * thisPtr);
+    Element_GetParent_t Element_GetParent_Original;
+
     using Element_SetBackgroundColor_t = HRESULT(__cdecl *)(
         DirectUI::Element *thisPtr,
         COLORREF color);
@@ -240,6 +249,12 @@ namespace
         bool visible);
     Element_SetVisible_t Element_SetVisible_Original;
 
+    // Verified dui70.dll export on the Windows 11 24H2 diagnostic target:
+    // ?GetVisible@Element@DirectUI@@QEAA_NXZ
+    using Element_GetVisible_t = bool(__cdecl *)(
+        DirectUI::Element *thisPtr);
+    Element_GetVisible_t Element_GetVisible_Original;
+
     using Element_SetRelPixHeight_t = HRESULT(__cdecl *)(
         DirectUI::Element *thisPtr,
         int height);
@@ -301,6 +316,28 @@ namespace
     COperationStatusTile_SetTileDisplayMode_t
         COperationStatusTile_SetTileDisplayMode_Original;
 
+    using COperationStatusTileRateCalculator_CalculateRate_t = double(__cdecl *)(
+        COperationStatusTileRateCalculator *thisPtr,
+        unsigned long long value1,
+        unsigned long long value2,
+        unsigned long long value3,
+        unsigned long long value4,
+        unsigned long long value5,
+        unsigned long long value6,
+        unsigned long long value7,
+        double *secondaryRate);
+    COperationStatusTileRateCalculator_CalculateRate_t
+        COperationStatusTileRateCalculator_CalculateRate_Original;
+
+    // Windows 11 24H2 shell32.dll 10.0.26100.8972, PDB
+    // 4907816C-76AB-D628-8BBE-01D3E8033EE9 age 1:
+    // - COperationStatusTile's constructor writes the
+    //   IOperationStatusTilePriv vftable at complete-object offset 0x18.
+    // - SetTileDisplayMode is at RVA 0x3943A0. Its entry is a full method
+    //   body, not an adjustor thunk, and it explicitly computes the complete
+    //   object with LEA reg,[this-18h] before internal tile calls.
+    constexpr ULONG_PTR kSetTileDisplayModeThisAdjustment = 0x18;
+
     struct TransferSummaryState
     {
         COperationStatusTile *owner;
@@ -313,6 +350,12 @@ namespace
         std::wstring nativeSummary;
         bool displayModeKnown;
         bool expanded;
+        double nativeDisplayRate = 0.0;
+        bool nativeDisplayRateValid = false;
+        unsigned long long completedItems = 0;
+        unsigned long long totalItems = 0;
+        bool itemsValid = false;
+        std::vector<double> nativeRateHistory;
     };
 
     std::mutex g_transferSummaryMutex;
@@ -411,8 +454,30 @@ namespace
 
     constexpr int kGraphHeight = 52;
     constexpr int kChartAreaHeight = 60;
+    constexpr int kChartAreaTopMargin = 4;
+    constexpr int kChartAreaBottomMargin = 3;
+    constexpr int kDisplayModeFooterReserveHeight = 28;
+    constexpr int kCustomCommonClientHeight =
+        kCircleHostY + kCircleWindowHeight +
+        kDisplayModeFooterReserveHeight;
+    constexpr int kExpandedChartSectionHeight =
+        kChartAreaTopMargin + kChartAreaHeight +
+        kChartAreaBottomMargin;
     constexpr wchar_t kCircleWindowClass[] =
         L"Windhawk.FileOperationStyler.ProgressCircle.0.10.3";
+    constexpr wchar_t kInfoPanelWindowClass[] =
+        L"Windhawk.FileOperationStyler.InfoPanel.0.10.41";
+    constexpr int kInfoPanelTop = 52;
+    constexpr int kInfoPanelCommonHeight = 58;
+    constexpr int kInfoPanelExpandedHeight = 130;
+    constexpr int kInfoPanelTextRowHeight = 18;
+    constexpr int kInfoPanelProgressTop = 43;
+    constexpr int kInfoPanelProgressHeight = 8;
+    constexpr int kInfoPanelChartTop = 68;
+    constexpr int kInfoPanelChartHeight = 60;
+    constexpr int kCompactRegularTileHeight = 118;
+    constexpr int kExpandedRegularTileHeight = 185;
+    constexpr size_t kInfoPanelRateHistorySamples = 72;
     constexpr UINT_PTR kHostWindowSubclassId = 0xF0510010;
     constexpr UINT_PTR kProgressWindowSubclassId = 0xF0510011;
 
@@ -420,6 +485,7 @@ namespace
     {
         OperationTileElement *tile;
         HWND circleWindow;
+        HWND infoWindow;
         HWND progressWindow;
         HWND hostWindow;
         int progressPercent;
@@ -441,15 +507,30 @@ namespace
         PCWSTR reason;
     };
 
+    struct DeferredDisplaySnapshot
+    {
+        COperationStatusTile *owner;
+        OperationTileElement *tile;
+        DirectUI::Element *operationTileRoot;
+        HWND hostWindow;
+        DWORD uiThreadId;
+        unsigned long long transitionId;
+        bool requestedExpanded;
+    };
+
     std::mutex g_circleMutex;
     std::vector<CircleState> g_circles;
     std::vector<HWND> g_subclassedHosts;
     std::vector<HostPositionRequest> g_hostPositionRequests;
+    std::mutex g_displayDiagnosticMutex;
+    std::vector<DeferredDisplaySnapshot> g_deferredDisplaySnapshots;
     HINSTANCE g_circleClassInstance;
     ATOM g_circleClassAtom;
+    ATOM g_infoPanelClassAtom;
     ULONG_PTR g_gdiplusToken;
     UINT g_removeHostSubclassMessage;
     UINT g_positionCirclesMessage;
+    UINT g_logDisplayStateMessage;
 
     void LogSetterFailure(unsigned long long eventId,
                           PCWSTR target,
@@ -581,7 +662,28 @@ namespace
 
     void DestroyProgressCircle(OperationTileElement *tile);
     void PositionProgressCirclesForHost(HWND hostWindow, PCWSTR reason);
+    void PositionInfoPanel(OperationTileElement *tile);
+    void InvalidateInfoPanelForTile(OperationTileElement *tile);
     void ScheduleProgressCirclePosition(HWND hostWindow, PCWSTR reason);
+    void HandleDeferredDisplaySnapshot(HWND hostWindow,
+                                       unsigned long long transitionId);
+    void LogFinalDisplayInvariant(COperationStatusTile *owner,
+                                  HWND hostWindow,
+                                  bool expanded,
+                                  bool applyResult,
+                                  unsigned long long transitionId);
+    bool ApplyDisplayMode(COperationStatusTile *owner,
+                          bool applyFinalHostGeometry,
+                          unsigned long long transitionId = 0);
+    void InitializeRegisteredDisplayMode(COperationStatusTile *owner);
+    bool GetVerifiedCustomHostWindowHeight(HWND hostWindow,
+                                           int nativeWindowHeight,
+                                           int *targetWindowHeight);
+    bool IsSingleNormalProgressTileForHost(OperationTileElement *tile,
+                                           HWND hostWindow);
+    void ApplyNativeDisplayRatesForHost(HWND hostWindow);
+    void CancelDeferredDisplaySnapshotsForHost(HWND hostWindow);
+    void CancelDeferredDisplaySnapshotsForTile(OperationTileElement *tile);
     LRESULT CALLBACK NativeProgressWindowSubclassProc(
         HWND window,
         UINT message,
@@ -589,6 +691,63 @@ namespace
         LPARAM lParam,
         UINT_PTR subclassId,
         DWORD_PTR referenceData);
+
+    PCWSTR WindowMessageName(UINT message)
+    {
+        switch (message)
+        {
+        case WM_SIZE:
+            return L"WM_SIZE";
+        case WM_SHOWWINDOW:
+            return L"WM_SHOWWINDOW";
+        case WM_WINDOWPOSCHANGING:
+            return L"WM_WINDOWPOSCHANGING";
+        case WM_WINDOWPOSCHANGED:
+            return L"WM_WINDOWPOSCHANGED";
+        case WM_NCDESTROY:
+            return L"WM_NCDESTROY";
+        default:
+            return L"UNKNOWN";
+        }
+    }
+
+    void LogTargetWindowMessage(PCWSTR target,
+                                PCWSTR phase,
+                                HWND window,
+                                UINT message,
+                                WPARAM wParam,
+                                LPARAM lParam)
+    {
+        if (message == WM_WINDOWPOSCHANGING ||
+            message == WM_WINDOWPOSCHANGED)
+        {
+            auto *windowPosition = reinterpret_cast<WINDOWPOS *>(lParam);
+            if (windowPosition)
+            {
+                Wh_Log(L"MODE_EVENT target=%s phase=%s message=%s hwnd=%p "
+                       L"thread=%lu insertAfter=%p x=%d y=%d cx=%d cy=%d "
+                       L"flags=0x%08X",
+                       target, phase, WindowMessageName(message),
+                       reinterpret_cast<void *>(window),
+                       GetCurrentThreadId(),
+                       reinterpret_cast<void *>(windowPosition->hwndInsertAfter),
+                       windowPosition->x, windowPosition->y,
+                       windowPosition->cx, windowPosition->cy,
+                       windowPosition->flags);
+                return;
+            }
+        }
+
+        Wh_Log(L"MODE_EVENT target=%s phase=%s message=%s hwnd=%p "
+               L"thread=%lu wParam=0x%llX lParam=0x%llX isWindow=%s "
+               L"visible=%s",
+               target, phase, WindowMessageName(message),
+               reinterpret_cast<void *>(window), GetCurrentThreadId(),
+               static_cast<unsigned long long>(wParam),
+               static_cast<unsigned long long>(lParam),
+               IsWindow(window) ? L"yes" : L"no",
+               IsWindow(window) && IsWindowVisible(window) ? L"yes" : L"no");
+    }
 
     int GetCircleProgress(HWND circleWindow)
     {
@@ -772,9 +931,446 @@ namespace
         EndPaint(circleWindow, &paint);
     }
 
+    struct InfoPanelSnapshot
+    {
+        int percent = 0;
+        unsigned long long completedBytes = 0;
+        unsigned long long totalBytes = 0;
+        unsigned long long completedItems = 0;
+        unsigned long long totalItems = 0;
+        bool bytesValid = false;
+        bool itemsValid = false;
+        double nativeRate = 0.0;
+        bool nativeRateValid = false;
+        bool expanded = false;
+        bool displayModeKnown = false;
+        std::vector<double> rateHistory;
+    };
+
+    bool GetInfoPanelSnapshot(HWND infoWindow,
+                              InfoPanelSnapshot *snapshot)
+    {
+        OperationTileElement *tile = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto it = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [infoWindow](CircleState const &state)
+                { return state.infoWindow == infoWindow; });
+            if (it == g_circles.end())
+            {
+                return false;
+            }
+            tile = it->tile;
+            snapshot->percent = std::clamp(it->progressPercent, 0, 100);
+        }
+
+        std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+        auto it = std::find_if(
+            g_transferSummaries.begin(), g_transferSummaries.end(),
+            [tile](TransferSummaryState const &state)
+            { return state.tile == tile; });
+        if (it == g_transferSummaries.end())
+        {
+            return false;
+        }
+
+        snapshot->completedBytes = it->completedBytes;
+        snapshot->totalBytes = it->totalBytes;
+        snapshot->completedItems = it->completedItems;
+        snapshot->totalItems = it->totalItems;
+        snapshot->bytesValid = it->bytesValid;
+        snapshot->itemsValid = it->itemsValid;
+        snapshot->nativeRate = it->nativeDisplayRate;
+        snapshot->nativeRateValid = it->nativeDisplayRateValid;
+        snapshot->expanded = it->expanded;
+        snapshot->displayModeKnown = it->displayModeKnown;
+        snapshot->rateHistory = it->nativeRateHistory;
+        return true;
+    }
+
+    void FormatRemainingTime(InfoPanelSnapshot const &snapshot,
+                             wchar_t *buffer,
+                             size_t bufferLength)
+    {
+        if (!buffer || !bufferLength)
+        {
+            return;
+        }
+
+        if (!snapshot.bytesValid || !snapshot.nativeRateValid ||
+            snapshot.nativeRate < 1.0 ||
+            snapshot.totalBytes < snapshot.completedBytes)
+        {
+            lstrcpynW(buffer, L"Calculating...",
+                      static_cast<int>(bufferLength));
+            return;
+        }
+
+        double secondsDouble =
+            static_cast<double>(snapshot.totalBytes -
+                                snapshot.completedBytes) /
+            snapshot.nativeRate;
+        unsigned long long seconds =
+            static_cast<unsigned long long>(
+                std::max(0.0, std::ceil(secondsDouble)));
+
+        if (seconds < 60)
+        {
+            std::swprintf(buffer, bufferLength, L"%llus", seconds);
+        }
+        else if (seconds < 3600)
+        {
+            unsigned long long minutes = seconds / 60;
+            unsigned long long remainder = seconds % 60;
+            if (remainder)
+            {
+                std::swprintf(buffer, bufferLength, L"%llum %llus",
+                              minutes, remainder);
+            }
+            else
+            {
+                std::swprintf(buffer, bufferLength, L"%llum", minutes);
+            }
+        }
+        else
+        {
+            unsigned long long hours = seconds / 3600;
+            unsigned long long minutes = (seconds % 3600) / 60;
+            std::swprintf(buffer, bufferLength, L"%lluh %llum",
+                          hours, minutes);
+        }
+    }
+
+    void DrawInfoPanelFrame(HWND infoWindow,
+                            HDC deviceContext,
+                            RECT const &clientRect)
+    {
+        int width = clientRect.right - clientRect.left;
+        int height = clientRect.bottom - clientRect.top;
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        UINT dpi = GetDpiForWindow(infoWindow);
+        if (!dpi)
+        {
+            dpi = USER_DEFAULT_SCREEN_DPI;
+        }
+
+        InfoPanelSnapshot snapshot{};
+        GetInfoPanelSnapshot(infoWindow, &snapshot);
+
+        Gdiplus::Graphics graphics(deviceContext);
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+        graphics.SetTextRenderingHint(
+            Gdiplus::TextRenderingHintClearTypeGridFit);
+
+        Gdiplus::SolidBrush backgroundBrush(Gdiplus::Color(
+            255, GetRValue(kBackgroundColor), GetGValue(kBackgroundColor),
+            GetBValue(kBackgroundColor)));
+        graphics.FillRectangle(&backgroundBrush, 0, 0, width, height);
+
+        Gdiplus::Font detailFont(
+            L"Segoe UI Variable",
+            static_cast<Gdiplus::REAL>(ScaleForDpi(12, dpi)),
+            Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::Font detailFallback(
+            L"Segoe UI",
+            static_cast<Gdiplus::REAL>(ScaleForDpi(12, dpi)),
+            Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::Font *selectedFont =
+            detailFont.GetLastStatus() == Gdiplus::Ok
+                ? &detailFont
+                : &detailFallback;
+
+        Gdiplus::SolidBrush primaryBrush(Gdiplus::Color(
+            255, GetRValue(kPrimaryTextColor), GetGValue(kPrimaryTextColor),
+            GetBValue(kPrimaryTextColor)));
+        Gdiplus::SolidBrush secondaryBrush(Gdiplus::Color(
+            255, GetRValue(kSecondaryTextColor),
+            GetGValue(kSecondaryTextColor), GetBValue(kSecondaryTextColor)));
+
+        wchar_t rateSize[64]{};
+        wchar_t timeText[64]{};
+        wchar_t speedTimeText[192]{};
+        if (snapshot.nativeRateValid)
+        {
+            unsigned long long roundedRate =
+                static_cast<unsigned long long>(
+                    std::max(0.0, snapshot.nativeRate) + 0.5);
+            StrFormatByteSizeW(static_cast<LONGLONG>(roundedRate),
+                               rateSize, ARRAYSIZE(rateSize));
+        }
+        else
+        {
+            lstrcpynW(rateSize, L"\x2014", ARRAYSIZE(rateSize));
+        }
+        FormatRemainingTime(snapshot, timeText, ARRAYSIZE(timeText));
+        std::swprintf(speedTimeText, ARRAYSIZE(speedTimeText),
+                      L"Speed: %s/s  \x2022  Time remaining: %s",
+                      rateSize, timeText);
+
+        Gdiplus::RectF speedBounds(
+            0.0f, 0.0f, static_cast<Gdiplus::REAL>(width),
+            static_cast<Gdiplus::REAL>(
+                ScaleForDpi(kInfoPanelTextRowHeight, dpi)));
+        graphics.DrawString(speedTimeText, -1, selectedFont, speedBounds,
+                            nullptr, &primaryBrush);
+
+        wchar_t remainingSize[64]{};
+        wchar_t itemsText[160]{};
+        unsigned long long remainingItems = 0;
+        unsigned long long remainingBytes = 0;
+        if (snapshot.itemsValid &&
+            snapshot.totalItems >= snapshot.completedItems)
+        {
+            remainingItems = snapshot.totalItems - snapshot.completedItems;
+        }
+        if (snapshot.bytesValid &&
+            snapshot.totalBytes >= snapshot.completedBytes)
+        {
+            remainingBytes = snapshot.totalBytes - snapshot.completedBytes;
+            StrFormatByteSizeW(static_cast<LONGLONG>(remainingBytes),
+                               remainingSize, ARRAYSIZE(remainingSize));
+        }
+
+        if (snapshot.itemsValid && snapshot.bytesValid)
+        {
+            std::swprintf(itemsText, ARRAYSIZE(itemsText),
+                          L"Items remaining: %llu (%s)", remainingItems,
+                          remainingSize);
+        }
+        else if (snapshot.itemsValid)
+        {
+            std::swprintf(itemsText, ARRAYSIZE(itemsText),
+                          L"Items remaining: %llu", remainingItems);
+        }
+        else
+        {
+            lstrcpynW(itemsText, L"Items remaining: Calculating...",
+                      ARRAYSIZE(itemsText));
+        }
+
+        Gdiplus::RectF itemsBounds(
+            0.0f,
+            static_cast<Gdiplus::REAL>(
+                ScaleForDpi(kInfoPanelTextRowHeight + 2, dpi)),
+            static_cast<Gdiplus::REAL>(width),
+            static_cast<Gdiplus::REAL>(
+                ScaleForDpi(kInfoPanelTextRowHeight, dpi)));
+        graphics.DrawString(itemsText, -1, selectedFont, itemsBounds,
+                            nullptr, &secondaryBrush);
+
+        Gdiplus::REAL progressTop = static_cast<Gdiplus::REAL>(
+            ScaleForDpi(kInfoPanelProgressTop, dpi));
+        Gdiplus::REAL progressHeight = static_cast<Gdiplus::REAL>(
+            ScaleForDpi(kInfoPanelProgressHeight, dpi));
+        Gdiplus::REAL progressWidth =
+            static_cast<Gdiplus::REAL>(std::max(width, 1));
+        Gdiplus::SolidBrush progressTrack(Gdiplus::Color(
+            255, GetRValue(kInactiveRingColor),
+            GetGValue(kInactiveRingColor), GetBValue(kInactiveRingColor)));
+        Gdiplus::SolidBrush progressFill(Gdiplus::Color(
+            255, GetRValue(kAccentRingColor),
+            GetGValue(kAccentRingColor), GetBValue(kAccentRingColor)));
+        graphics.FillRectangle(&progressTrack, 0.0f, progressTop,
+                               progressWidth, progressHeight);
+        Gdiplus::REAL completedWidth =
+            progressWidth *
+            static_cast<Gdiplus::REAL>(
+                std::clamp(snapshot.percent, 0, 100)) /
+            100.0f;
+        if (completedWidth > 0.0f)
+        {
+            graphics.FillRectangle(&progressFill, 0.0f, progressTop,
+                                   completedWidth, progressHeight);
+        }
+
+        if (!snapshot.expanded)
+        {
+            return;
+        }
+
+        int chartTop = ScaleForDpi(kInfoPanelChartTop, dpi);
+        int chartHeight = ScaleForDpi(kInfoPanelChartHeight, dpi);
+        int chartWidth = width;
+        if (chartTop + chartHeight > height || chartWidth <= 0)
+        {
+            return;
+        }
+
+        Gdiplus::SolidBrush chartBackground(Gdiplus::Color(
+            255, GetRValue(kGraphSurfaceColor),
+            GetGValue(kGraphSurfaceColor), GetBValue(kGraphSurfaceColor)));
+        graphics.FillRectangle(&chartBackground, 0, chartTop,
+                               chartWidth, chartHeight);
+
+        Gdiplus::Pen gridPen(Gdiplus::Color(70, 120, 128, 138), 1.0f);
+        for (int row = 1; row < 4; ++row)
+        {
+            Gdiplus::REAL y = static_cast<Gdiplus::REAL>(
+                chartTop + (chartHeight * row) / 4);
+            graphics.DrawLine(&gridPen, 0.0f, y,
+                              static_cast<Gdiplus::REAL>(chartWidth), y);
+        }
+        for (int column = 1; column < 6; ++column)
+        {
+            Gdiplus::REAL x = static_cast<Gdiplus::REAL>(
+                (chartWidth * column) / 6);
+            graphics.DrawLine(&gridPen, x,
+                              static_cast<Gdiplus::REAL>(chartTop), x,
+                              static_cast<Gdiplus::REAL>(
+                                  chartTop + chartHeight));
+        }
+
+        if (snapshot.rateHistory.empty())
+        {
+            return;
+        }
+
+        double maximumRate = 1.0;
+        for (double rate : snapshot.rateHistory)
+        {
+            if (std::isfinite(rate))
+            {
+                maximumRate = std::max(maximumRate, rate);
+            }
+        }
+
+        size_t sampleCount = snapshot.rateHistory.size();
+        std::vector<Gdiplus::PointF> linePoints;
+        linePoints.reserve(sampleCount);
+        for (size_t index = 0; index < sampleCount; ++index)
+        {
+            double rate = std::isfinite(snapshot.rateHistory[index])
+                              ? std::max(0.0, snapshot.rateHistory[index])
+                              : 0.0;
+            Gdiplus::REAL x = sampleCount > 1
+                                  ? static_cast<Gdiplus::REAL>(
+                                        (static_cast<double>(index) /
+                                         static_cast<double>(
+                                             sampleCount - 1)) *
+                                        (chartWidth - 1))
+                                  : 0.0f;
+            Gdiplus::REAL normalized =
+                static_cast<Gdiplus::REAL>(rate / maximumRate);
+            Gdiplus::REAL y =
+                static_cast<Gdiplus::REAL>(chartTop + chartHeight - 1) -
+                normalized *
+                    static_cast<Gdiplus::REAL>(chartHeight - 2);
+            linePoints.emplace_back(x, y);
+        }
+
+        if (linePoints.size() >= 2)
+        {
+            std::vector<Gdiplus::PointF> fillPoints;
+            fillPoints.reserve(linePoints.size() + 2);
+            fillPoints.emplace_back(
+                linePoints.front().X,
+                static_cast<Gdiplus::REAL>(chartTop + chartHeight));
+            fillPoints.insert(fillPoints.end(), linePoints.begin(),
+                              linePoints.end());
+            fillPoints.emplace_back(
+                linePoints.back().X,
+                static_cast<Gdiplus::REAL>(chartTop + chartHeight));
+
+            Gdiplus::SolidBrush chartFill(Gdiplus::Color(
+                150, GetRValue(kAccentRingColor),
+                GetGValue(kAccentRingColor), GetBValue(kAccentRingColor)));
+            Gdiplus::Pen chartLine(Gdiplus::Color(
+                255, GetRValue(kAccentRingColor),
+                GetGValue(kAccentRingColor), GetBValue(kAccentRingColor)),
+                1.5f);
+            graphics.FillPolygon(&chartFill, fillPoints.data(),
+                                 static_cast<INT>(fillPoints.size()));
+            graphics.DrawLines(&chartLine, linePoints.data(),
+                               static_cast<INT>(linePoints.size()));
+        }
+    }
+
+    void PaintInfoPanel(HWND infoWindow)
+    {
+        PAINTSTRUCT paint{};
+        HDC paintDeviceContext = BeginPaint(infoWindow, &paint);
+        if (!paintDeviceContext)
+        {
+            return;
+        }
+
+        RECT clientRect{};
+        if (!GetClientRect(infoWindow, &clientRect))
+        {
+            EndPaint(infoWindow, &paint);
+            return;
+        }
+
+        int width = clientRect.right - clientRect.left;
+        int height = clientRect.bottom - clientRect.top;
+        HDC memoryDeviceContext =
+            width > 0 && height > 0
+                ? CreateCompatibleDC(paintDeviceContext)
+                : nullptr;
+        HBITMAP backBuffer =
+            memoryDeviceContext
+                ? CreateCompatibleBitmap(paintDeviceContext, width, height)
+                : nullptr;
+        HGDIOBJ previousBitmap =
+            backBuffer
+                ? SelectObject(memoryDeviceContext, backBuffer)
+                : nullptr;
+
+        if (memoryDeviceContext && backBuffer && previousBitmap &&
+            previousBitmap != HGDI_ERROR)
+        {
+            DrawInfoPanelFrame(infoWindow, memoryDeviceContext, clientRect);
+            BitBlt(paintDeviceContext, 0, 0, width, height,
+                   memoryDeviceContext, 0, 0, SRCCOPY);
+            SelectObject(memoryDeviceContext, previousBitmap);
+        }
+        else
+        {
+            DrawInfoPanelFrame(infoWindow, paintDeviceContext, clientRect);
+        }
+
+        if (backBuffer)
+        {
+            DeleteObject(backBuffer);
+        }
+        if (memoryDeviceContext)
+        {
+            DeleteDC(memoryDeviceContext);
+        }
+        EndPaint(infoWindow, &paint);
+    }
+
+    LRESULT CALLBACK InfoPanelWindowProc(HWND window,
+                                         UINT message,
+                                         WPARAM wParam,
+                                         LPARAM lParam)
+    {
+        switch (message)
+        {
+        case WM_PAINT:
+            PaintInfoPanel(window);
+            return 0;
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+        case WM_NCHITTEST:
+            return HTTRANSPARENT;
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+
     void ForgetCircleWindow(HWND circleWindow)
     {
         HWND progressWindow = nullptr;
+        HWND infoWindow = nullptr;
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
             auto it = std::find_if(
@@ -788,6 +1384,7 @@ namespace
                 return;
             }
             progressWindow = it->progressWindow;
+            infoWindow = it->infoWindow;
             g_circles.erase(it);
         }
 
@@ -796,6 +1393,10 @@ namespace
             RemoveWindowSubclass(progressWindow,
                                  NativeProgressWindowSubclassProc,
                                  kProgressWindowSubclassId);
+        }
+        if (infoWindow && IsWindow(infoWindow))
+        {
+            DestroyWindow(infoWindow);
         }
     }
 
@@ -890,11 +1491,39 @@ namespace
                                      NativeProgressWindowSubclassProc,
                                      kProgressWindowSubclassId);
             }
+            if (state.infoWindow && IsWindow(state.infoWindow))
+            {
+                DestroyWindow(state.infoWindow);
+            }
             if (state.circleWindow && IsWindow(state.circleWindow))
             {
                 DestroyWindow(state.circleWindow);
             }
         }
+    }
+
+    void CancelDeferredDisplaySnapshotsForHost(HWND hostWindow)
+    {
+        std::lock_guard<std::mutex> lock(g_displayDiagnosticMutex);
+        g_deferredDisplaySnapshots.erase(
+            std::remove_if(
+                g_deferredDisplaySnapshots.begin(),
+                g_deferredDisplaySnapshots.end(),
+                [hostWindow](DeferredDisplaySnapshot const &snapshot)
+                { return snapshot.hostWindow == hostWindow; }),
+            g_deferredDisplaySnapshots.end());
+    }
+
+    void CancelDeferredDisplaySnapshotsForTile(OperationTileElement *tile)
+    {
+        std::lock_guard<std::mutex> lock(g_displayDiagnosticMutex);
+        g_deferredDisplaySnapshots.erase(
+            std::remove_if(
+                g_deferredDisplaySnapshots.begin(),
+                g_deferredDisplaySnapshots.end(),
+                [tile](DeferredDisplaySnapshot const &snapshot)
+                { return snapshot.tile == tile; }),
+            g_deferredDisplaySnapshots.end());
     }
 
     int GetSingleCirclePercentForHost(HWND hostWindow)
@@ -961,10 +1590,6 @@ namespace
 
         wchar_t currentCaption[160]{};
         GetWindowTextW(hostWindow, currentCaption, ARRAYSIZE(currentCaption));
-        if (!LooksLikeNativeProgressCaption(currentCaption))
-        {
-            return;
-        }
 
         wchar_t synchronizedCaption[80]{};
         bool paused = wcsstr(currentCaption, L"Paused") != nullptr;
@@ -982,12 +1607,37 @@ namespace
         UINT_PTR subclassId,
         DWORD_PTR)
     {
+        bool logLayoutMessage =
+            message == WM_SIZE || message == WM_WINDOWPOSCHANGING ||
+            message == WM_WINDOWPOSCHANGED;
+        if (logLayoutMessage)
+        {
+            LogTargetWindowMessage(L"OperationStatusWindow", L"BEFORE_DEF",
+                                   window, message, wParam, lParam);
+        }
+
         if (message == WM_SETTEXT)
         {
             PCWSTR caption = reinterpret_cast<PCWSTR>(lParam);
             if (LooksLikeTransferSummaryCaption(caption))
             {
-                // Keep transferred/total in the body only.
+                // Explorer can publish a transient byte-summary caption before
+                // the progress caption. Replace it with the same normalized
+                // percentage used by the circle instead of merely suppressing
+                // the update and leaving an older byte caption frozen.
+                int percent = GetSingleCirclePercentForHost(window);
+                if (percent >= 0)
+                {
+                    wchar_t synchronizedCaption[80]{};
+                    bool paused = wcsstr(caption, L"Paused") != nullptr;
+                    wsprintfW(synchronizedCaption,
+                              paused ? L"Paused - %d%% complete"
+                                     : L"%d%% complete",
+                              percent);
+                    return DefSubclassProc(
+                        window, message, wParam,
+                        reinterpret_cast<LPARAM>(synchronizedCaption));
+                }
                 return TRUE;
             }
 
@@ -1011,6 +1661,7 @@ namespace
 
         if (message == g_removeHostSubclassMessage)
         {
+            CancelDeferredDisplaySnapshotsForHost(window);
             RemoveHostSubclassRecord(window);
             RemoveWindowSubclass(window, OperationStatusWindowSubclassProc,
                                  subclassId);
@@ -1023,19 +1674,64 @@ namespace
             if (reason)
             {
                 PositionProgressCirclesForHost(window, reason);
+                ApplyNativeDisplayRatesForHost(window);
             }
+            return 0;
+        }
+
+        if (message == g_logDisplayStateMessage)
+        {
+            HandleDeferredDisplaySnapshot(
+                window, static_cast<unsigned long long>(wParam));
             return 0;
         }
 
         if (message == WM_NCDESTROY)
         {
+            CancelDeferredDisplaySnapshotsForHost(window);
             DestroyProgressCirclesForHost(window);
             RemoveHostSubclassRecord(window);
             RemoveWindowSubclass(window, OperationStatusWindowSubclassProc,
                                  subclassId);
         }
 
+        int requestedCy = 0;
+        if (message == WM_WINDOWPOSCHANGING && lParam)
+        {
+            requestedCy =
+                reinterpret_cast<WINDOWPOS *>(lParam)->cy;
+        }
+
         LRESULT result = DefSubclassProc(window, message, wParam, lParam);
+        if (logLayoutMessage)
+        {
+            LogTargetWindowMessage(L"OperationStatusWindow", L"AFTER_DEF",
+                                   window, message, wParam, lParam);
+        }
+
+        if (message == WM_WINDOWPOSCHANGING && lParam)
+        {
+            auto *windowPosition = reinterpret_cast<WINDOWPOS *>(lParam);
+            int nativeCy = windowPosition->cy;
+            int customCy = 0;
+            static thread_local bool applyingHeightOverride;
+            if (!(windowPosition->flags & SWP_NOSIZE) &&
+                !applyingHeightOverride)
+            {
+                applyingHeightOverride = true;
+                bool verified = GetVerifiedCustomHostWindowHeight(
+                    window, nativeCy, &customCy);
+                applyingHeightOverride = false;
+                if (verified)
+                {
+                    windowPosition->cy = customCy;
+                    Wh_Log(L"CUSTOM_HEIGHT host=%p requestedCy=%d "
+                           L"nativeCy=%d finalCy=%d result=overridden",
+                           reinterpret_cast<void *>(window), requestedCy,
+                           nativeCy, windowPosition->cy);
+                }
+            }
+        }
         if (message == WM_SIZE)
         {
             ScheduleProgressCirclePosition(window, L"host-size");
@@ -1095,7 +1791,21 @@ namespace
         UINT_PTR subclassId,
         DWORD_PTR)
     {
+        bool logTransitionMessage =
+            message == WM_SHOWWINDOW || message == WM_WINDOWPOSCHANGING ||
+            message == WM_WINDOWPOSCHANGED || message == WM_NCDESTROY;
+        if (logTransitionMessage)
+        {
+            LogTargetWindowMessage(L"NativeProgressHWND", L"BEFORE_DEF",
+                                   window, message, wParam, lParam);
+        }
+
         LRESULT result = DefSubclassProc(window, message, wParam, lParam);
+        if (logTransitionMessage)
+        {
+            LogTargetWindowMessage(L"NativeProgressHWND", L"AFTER_DEF",
+                                   window, message, wParam, lParam);
+        }
         if (message == WM_NCDESTROY)
         {
             RemoveWindowSubclass(window, NativeProgressWindowSubclassProc,
@@ -1171,6 +1881,89 @@ namespace
         return false;
     }
 
+
+    HWND GetInfoPanelWindowForTile(OperationTileElement *tile)
+    {
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        auto it = std::find_if(
+            g_circles.begin(), g_circles.end(),
+            [tile](CircleState const &state)
+            { return state.tile == tile; });
+        return it != g_circles.end() ? it->infoWindow : nullptr;
+    }
+
+    void InvalidateInfoPanelForTile(OperationTileElement *tile)
+    {
+        HWND infoWindow = GetInfoPanelWindowForTile(tile);
+        if (infoWindow && IsWindow(infoWindow))
+        {
+            InvalidateRect(infoWindow, nullptr, FALSE);
+        }
+    }
+
+    void PositionInfoPanel(OperationTileElement *tile)
+    {
+        HWND infoWindow = nullptr;
+        HWND hostWindow = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto it = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [tile](CircleState const &state)
+                { return state.tile == tile; });
+            if (it == g_circles.end())
+            {
+                return;
+            }
+            infoWindow = it->infoWindow;
+            hostWindow = it->hostWindow;
+        }
+
+        if (!infoWindow || !IsWindow(infoWindow) ||
+            !hostWindow || !IsWindow(hostWindow))
+        {
+            return;
+        }
+
+        bool expanded = false;
+        bool modeKnown = false;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [tile](TransferSummaryState const &state)
+                { return state.tile == tile; });
+            if (it != g_transferSummaries.end())
+            {
+                expanded = it->expanded;
+                modeKnown = it->displayModeKnown;
+            }
+        }
+
+        UINT dpi = GetDpiForWindow(hostWindow);
+        RECT clientRect{};
+        if (!dpi || !GetClientRect(hostWindow, &clientRect))
+        {
+            return;
+        }
+
+        int x = ScaleForDpi(kReservedLeftWidth, dpi);
+        int y = ScaleForDpi(kInfoPanelTop, dpi);
+        int rightPadding = ScaleForDpi(kContentRightPadding, dpi);
+        int width = std::max(static_cast<int>(clientRect.right) - x - rightPadding, 1);
+        int logicalHeight =
+            modeKnown && expanded ? kInfoPanelExpandedHeight
+                                  : kInfoPanelCommonHeight;
+        int height = ScaleForDpi(logicalHeight, dpi);
+
+        if (SetWindowPos(infoWindow, HWND_TOP, x, y, width, height,
+                         SWP_NOACTIVATE | SWP_NOOWNERZORDER |
+                             SWP_SHOWWINDOW))
+        {
+            InvalidateRect(infoWindow, nullptr, FALSE);
+        }
+    }
+
     void PositionProgressCircle(OperationTileElement *tile, PCWSTR reason)
     {
         HWND circleWindow = nullptr;
@@ -1194,10 +1987,9 @@ namespace
             latestProgressWindow = nullptr;
         }
 
-        // The ring is the visible progress indicator. Keep Explorer's native
-        // progress HWND alive as the authoritative PBM progress source, but
-        // hide the HWND itself so its residual strip cannot bleed through the
-        // custom composition. This no longer controls circle visibility.
+        // The custom info panel now renders the completion bar. Keep the
+        // native HWND only as the authoritative progress data source and hide
+        // its visual presentation whenever Explorer recreates/rebinds it.
         if (latestProgressWindow && IsWindowVisible(latestProgressWindow))
         {
             ShowWindow(latestProgressWindow, SW_HIDE);
@@ -1303,6 +2095,7 @@ namespace
                initialPlacement ? L"initial" : reason,
                positionChanged ? L"yes" : L"no",
                visibilityChanged ? L"yes" : L"no");
+        PositionInfoPanel(tile);
     }
 
     void PositionProgressCirclesForHost(HWND hostWindow, PCWSTR reason)
@@ -1400,6 +2193,580 @@ namespace
         return FindCurrentThreadOperationStatusWindow(eventId);
     }
 
+    bool CopyRegisteredTransferState(COperationStatusTile *owner,
+                                     TransferSummaryState *state)
+    {
+        std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+        auto it = std::find_if(
+            g_transferSummaries.begin(), g_transferSummaries.end(),
+            [owner](TransferSummaryState const &candidate)
+            { return candidate.owner == owner; });
+        if (it == g_transferSummaries.end())
+        {
+            return false;
+        }
+        *state = *it;
+        return true;
+    }
+
+    HWND GetRegisteredCircleHost(OperationTileElement *tile)
+    {
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        auto it = std::find_if(
+            g_circles.begin(), g_circles.end(),
+            [tile](CircleState const &state)
+            { return state.tile == tile; });
+        return it != g_circles.end() ? it->hostWindow : nullptr;
+    }
+
+    bool GetUniqueRegisteredCircleHost(OperationTileElement *tile,
+                                       HWND *hostWindow)
+    {
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        HWND match = nullptr;
+        size_t matches = 0;
+        for (CircleState const &state : g_circles)
+        {
+            if (state.tile == tile)
+            {
+                match = state.hostWindow;
+                ++matches;
+            }
+        }
+        if (matches != 1)
+        {
+            return false;
+        }
+        *hostWindow = match;
+        return true;
+    }
+
+    bool IsLiveDisplayModeState(TransferSummaryState const &state)
+    {
+        if (!state.tile || !state.operationTileRoot)
+        {
+            return false;
+        }
+
+        HWND hostWindow = nullptr;
+        if (!GetUniqueRegisteredCircleHost(state.tile, &hostWindow) ||
+            !hostWindow || !IsWindow(hostWindow) ||
+            GetWindowThreadProcessId(hostWindow, nullptr) !=
+                GetCurrentThreadId())
+        {
+            return false;
+        }
+
+        wchar_t className[64]{};
+        return GetClassNameW(hostWindow, className, ARRAYSIZE(className)) &&
+               lstrcmpW(className, L"OperationStatusWindow") == 0;
+    }
+
+    bool ResolveDisplayModeOwner(COperationStatusTile *requestedOwner,
+                                 unsigned long long transitionId,
+                                 COperationStatusTile **canonicalOwner,
+                                 bool logResult = true)
+    {
+        std::vector<TransferSummaryState> states;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            states = g_transferSummaries;
+        }
+
+        auto resolveCandidate = [&states](COperationStatusTile *candidate)
+            -> bool
+        {
+            TransferSummaryState match{};
+            size_t matches = 0;
+            for (TransferSummaryState const &state : states)
+            {
+                if (state.owner == candidate)
+                {
+                    match = state;
+                    ++matches;
+                }
+            }
+            return matches == 1 && IsLiveDisplayModeState(match);
+        };
+
+        if (resolveCandidate(requestedOwner))
+        {
+            *canonicalOwner = requestedOwner;
+            if (logResult)
+            {
+                Wh_Log(L"MODE[%llu] OWNER_RESOLVE requested=%p canonical=%p "
+                       L"adjustment=0x0 result=matched",
+                       transitionId, reinterpret_cast<void *>(requestedOwner),
+                       reinterpret_cast<void *>(requestedOwner));
+            }
+            return true;
+        }
+
+        ULONG_PTR requestedAddress =
+            reinterpret_cast<ULONG_PTR>(requestedOwner);
+        if (requestedAddress >= kSetTileDisplayModeThisAdjustment)
+        {
+            auto *adjustedCandidate = reinterpret_cast<COperationStatusTile *>(
+                requestedAddress - kSetTileDisplayModeThisAdjustment);
+            if (resolveCandidate(adjustedCandidate))
+            {
+                *canonicalOwner = adjustedCandidate;
+                if (logResult)
+                {
+                    Wh_Log(
+                        L"MODE[%llu] OWNER_RESOLVE requested=%p canonical=%p "
+                        L"adjustment=0x%llX result=matched",
+                        transitionId,
+                        reinterpret_cast<void *>(requestedOwner),
+                        reinterpret_cast<void *>(adjustedCandidate),
+                        static_cast<unsigned long long>(
+                            kSetTileDisplayModeThisAdjustment));
+                }
+                return true;
+            }
+        }
+
+        *canonicalOwner = nullptr;
+        if (logResult)
+        {
+            Wh_Log(L"MODE[%llu] OWNER_RESOLVE requested=%p canonical=%p "
+                   L"adjustment=0x%llX result=failed",
+                   transitionId, reinterpret_cast<void *>(requestedOwner),
+                   nullptr,
+                   static_cast<unsigned long long>(
+                       kSetTileDisplayModeThisAdjustment));
+        }
+        return false;
+    }
+
+    void LogRegisteredTransferStatesForDisplayMode(
+        COperationStatusTile *requestedOwner,
+        unsigned long long transitionId)
+    {
+        std::vector<TransferSummaryState> states;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            states = g_transferSummaries;
+        }
+
+        Wh_Log(L"MODE[%llu] REGISTRY requestedOwner=%p entries=%llu "
+               L"thread=%lu",
+               transitionId, reinterpret_cast<void *>(requestedOwner),
+               static_cast<unsigned long long>(states.size()),
+               GetCurrentThreadId());
+
+        ULONG_PTR requestedAddress =
+            reinterpret_cast<ULONG_PTR>(requestedOwner);
+        for (size_t index = 0; index < states.size(); ++index)
+        {
+            TransferSummaryState const &state = states[index];
+            HWND hostWindow = state.tile
+                                  ? GetRegisteredCircleHost(state.tile)
+                                  : nullptr;
+            ULONG_PTR registeredAddress =
+                reinterpret_cast<ULONG_PTR>(state.owner);
+            long long ownerDelta =
+                static_cast<long long>(requestedAddress) -
+                static_cast<long long>(registeredAddress);
+            Wh_Log(L"MODE[%llu] REGISTRY[%llu] owner=%p tile=%p "
+                   L"operationRoot=%p host=%p hostIsWindow=%s "
+                   L"ownerDelta=%lld displayModeKnown=%s expanded=%s",
+                   transitionId, static_cast<unsigned long long>(index),
+                   reinterpret_cast<void *>(state.owner),
+                   reinterpret_cast<void *>(state.tile),
+                   reinterpret_cast<void *>(state.operationTileRoot),
+                   reinterpret_cast<void *>(hostWindow),
+                   hostWindow && IsWindow(hostWindow) ? L"yes" : L"no",
+                   ownerDelta,
+                   state.displayModeKnown ? L"true" : L"false",
+                   state.expanded ? L"true" : L"false");
+        }
+    }
+
+    void LogDisplayElement(unsigned long long transitionId,
+                           PCWSTR phase,
+                           PCWSTR name,
+                           DirectUI::Element *element,
+                           bool logVisibility)
+    {
+        RECT bounds{};
+        HRESULT boundsResult = element
+                                   ? Element_GetRootRelativeBounds_Original(
+                                         element, &bounds)
+                                   : E_POINTER;
+        bool visible = element && logVisibility
+                           ? Element_GetVisible_Original(element)
+                           : false;
+        Wh_Log(L"MODE[%llu] %s element=%s exists=%s ptr=%p visibility=%s "
+               L"boundsResult=0x%08X bounds=[%ld,%ld,%ld,%ld]",
+               transitionId, phase, name, element ? L"yes" : L"no",
+               reinterpret_cast<void *>(element),
+               logVisibility ? (element ? (visible ? L"visible" : L"hidden")
+                                        : L"unavailable")
+                             : L"not-requested",
+               static_cast<unsigned int>(boundsResult), bounds.left,
+               bounds.top, bounds.right, bounds.bottom);
+    }
+
+    void LogDisplayRow(unsigned long long transitionId,
+                       PCWSTR phase,
+                       PCWSTR name,
+                       DirectUI::Element *first,
+                       DirectUI::Element *second)
+    {
+        RECT firstBounds{};
+        RECT secondBounds{};
+        HRESULT firstResult = first
+                                  ? Element_GetRootRelativeBounds_Original(
+                                        first, &firstBounds)
+                                  : E_POINTER;
+        HRESULT secondResult = second
+                                   ? Element_GetRootRelativeBounds_Original(
+                                         second, &secondBounds)
+                                   : E_POINTER;
+        RECT rowBounds{};
+        bool valid = SUCCEEDED(firstResult) && SUCCEEDED(secondResult);
+        if (valid)
+        {
+            rowBounds.left = std::min(firstBounds.left, secondBounds.left);
+            rowBounds.top = std::min(firstBounds.top, secondBounds.top);
+            rowBounds.right = std::max(firstBounds.right, secondBounds.right);
+            rowBounds.bottom = std::max(firstBounds.bottom,
+                                        secondBounds.bottom);
+        }
+        Wh_Log(L"MODE[%llu] %s row=%s first=%p second=%p valid=%s "
+               L"bounds=[%ld,%ld,%ld,%ld]",
+               transitionId, phase, name,
+               reinterpret_cast<void *>(first),
+               reinterpret_cast<void *>(second),
+               valid ? L"yes" : L"no", rowBounds.left, rowBounds.top,
+               rowBounds.right, rowBounds.bottom);
+    }
+
+    thread_local bool g_displaySnapshotActive;
+
+    void LogDisplayState(COperationStatusTile *owner,
+                         unsigned long long transitionId,
+                         PCWSTR phase,
+                         bool requestedExpanded,
+                         DeferredDisplaySnapshot const *expected = nullptr)
+    {
+        if (g_displaySnapshotActive)
+        {
+            Wh_Log(L"MODE[%llu] %s snapshot-skipped reason=reentrant",
+                   transitionId, phase);
+            return;
+        }
+
+        g_displaySnapshotActive = true;
+        struct SnapshotGuard
+        {
+            ~SnapshotGuard()
+            {
+                g_displaySnapshotActive = false;
+            }
+        } guard;
+
+        TransferSummaryState state{};
+        bool registered = CopyRegisteredTransferState(owner, &state);
+        DWORD currentThreadId = GetCurrentThreadId();
+        if (expected &&
+            (!registered || state.tile != expected->tile ||
+             state.operationTileRoot != expected->operationTileRoot ||
+             currentThreadId != expected->uiThreadId))
+        {
+            Wh_Log(L"MODE[%llu] %s requestedExpanded=%s owner=%p thread=%lu "
+                   L"snapshot-skipped reason=stale-registration",
+                   transitionId, phase,
+                   requestedExpanded ? L"true" : L"false",
+                   reinterpret_cast<void *>(owner), currentThreadId);
+            return;
+        }
+
+        OperationTileElement *tile = registered ? state.tile : nullptr;
+        DirectUI::Element *tileRoot =
+            registered ? state.operationTileRoot : nullptr;
+        HWND progressWindow = nullptr;
+        if (tile && tileRoot)
+        {
+            progressWindow =
+                OperationTileElement_GetProgressHWND_Original(tile);
+        }
+
+        bool progressIsWindow = progressWindow && IsWindow(progressWindow);
+        HWND hostWindow = progressIsWindow
+                              ? GetAncestor(progressWindow, GA_ROOT)
+                              : GetRegisteredCircleHost(tile);
+        if (expected && hostWindow != expected->hostWindow)
+        {
+            Wh_Log(L"MODE[%llu] %s requestedExpanded=%s owner=%p tile=%p "
+                   L"host=%p expectedHost=%p thread=%lu snapshot-skipped "
+                   L"reason=host-changed",
+                   transitionId, phase,
+                   requestedExpanded ? L"true" : L"false",
+                   reinterpret_cast<void *>(owner),
+                   reinterpret_cast<void *>(tile),
+                   reinterpret_cast<void *>(hostWindow),
+                   reinterpret_cast<void *>(expected->hostWindow),
+                   currentThreadId);
+            return;
+        }
+
+        Wh_Log(L"MODE[%llu] %s requestedExpanded=%s storedKnown=%s "
+               L"storedExpanded=%s owner=%p tile=%p host=%p thread=%lu",
+               transitionId, phase,
+               requestedExpanded ? L"true" : L"false",
+               registered && state.displayModeKnown ? L"true" : L"false",
+               registered && state.expanded ? L"true" : L"false",
+               reinterpret_cast<void *>(owner),
+               reinterpret_cast<void *>(tile),
+               reinterpret_cast<void *>(hostWindow), currentThreadId);
+
+        if (!tileRoot)
+        {
+            Wh_Log(L"MODE[%llu] %s elements-unavailable "
+                   L"reason=tile-root-not-registered",
+                   transitionId, phase);
+            return;
+        }
+
+        DirectUI::Element *details = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltDetails", false);
+        DirectUI::Element *descriptionHeader = state.tileHeaderRoot;
+        DirectUI::Element *summary = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltSummary", false);
+        DirectUI::Element *speedLabel = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltItemNameLabel", false);
+        DirectUI::Element *speedValue = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltItemName", false);
+        DirectUI::Element *timeRemainingLabel = FindSkinElement(
+            tileRoot, state.tileHeaderRoot,
+            L"eltTimeRemainingLabel", false);
+        DirectUI::Element *timeRemaining = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltTimeRemaining", false);
+        DirectUI::Element *itemsRemainingLabel = FindSkinElement(
+            tileRoot, state.tileHeaderRoot,
+            L"eltItemsRemainingLabel", false);
+        DirectUI::Element *itemsRemaining = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltItemsRemaining", false);
+        DirectUI::Element *chartArea = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltChartArea", false);
+        DirectUI::Element *rateChart = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltRateChart_New", false);
+        DirectUI::Element *progressBarContainer = FindSkinElement(
+            tileRoot, state.tileHeaderRoot,
+            L"eltProgressBarContainer", false);
+        DirectUI::Element *progressBar = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltProgressBar", false);
+        DirectUI::Element *regularTile = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltRegularTile", false);
+        DirectUI::Element *displayModeButton = FindSkinElement(
+            tileRoot, state.tileHeaderRoot, L"eltDisplayModeBtn", true);
+
+        LogDisplayElement(transitionId, phase, L"descriptionHeader",
+                          descriptionHeader, true);
+        LogDisplayElement(transitionId, phase, L"eltSummary", summary, true);
+        LogDisplayElement(transitionId, phase, L"speedElement", speedValue,
+                          true);
+        LogDisplayRow(transitionId, phase, L"speedRow", speedLabel,
+                      speedValue);
+        LogDisplayRow(transitionId, phase, L"timeRow", timeRemainingLabel,
+                      timeRemaining);
+        LogDisplayRow(transitionId, phase, L"itemsRow", itemsRemainingLabel,
+                      itemsRemaining);
+        LogDisplayElement(transitionId, phase, L"eltDetails", details, true);
+        LogDisplayElement(transitionId, phase, L"eltTimeRemaining",
+                          timeRemaining, true);
+        LogDisplayElement(transitionId, phase, L"eltItemsRemaining",
+                          itemsRemaining, true);
+        LogDisplayElement(transitionId, phase, L"eltChartArea", chartArea,
+                          true);
+        LogDisplayElement(transitionId, phase, L"eltRateChart_New", rateChart,
+                          true);
+        LogDisplayElement(transitionId, phase, L"eltProgressBarContainer",
+                          progressBarContainer, true);
+        LogDisplayElement(transitionId, phase, L"eltProgressBar", progressBar,
+                          true);
+        LogDisplayElement(transitionId, phase, L"eltRegularTile", regularTile,
+                          false);
+        LogDisplayElement(transitionId, phase, L"eltDisplayModeBtn",
+                          displayModeButton, true);
+        Wh_Log(L"MODE[%llu] %s element=eltDisplayModeBtn "
+               L"textState=not-logged-no-verified-getter",
+               transitionId, phase);
+
+        RECT progressScreenRect{};
+        RECT progressHostRect{};
+        bool progressRectValid =
+            progressIsWindow &&
+            GetWindowRect(progressWindow, &progressScreenRect);
+        bool progressHostRectValid = false;
+        if (progressRectValid && hostWindow && IsWindow(hostWindow))
+        {
+            progressHostRect = progressScreenRect;
+            SetLastError(ERROR_SUCCESS);
+            int mapResult = MapWindowPoints(
+                HWND_DESKTOP, hostWindow,
+                reinterpret_cast<POINT *>(&progressHostRect), 2);
+            progressHostRectValid =
+                mapResult != 0 || GetLastError() == ERROR_SUCCESS;
+        }
+        Wh_Log(L"MODE[%llu] %s nativeProgress hwnd=%p isWindow=%s "
+               L"visible=%s screenRectValid=%s screen=[%ld,%ld,%ld,%ld] "
+               L"hostRectValid=%s hostRelative=[%ld,%ld,%ld,%ld]",
+               transitionId, phase,
+               reinterpret_cast<void *>(progressWindow),
+               progressIsWindow ? L"yes" : L"no",
+               progressIsWindow && IsWindowVisible(progressWindow) ? L"yes"
+                                                                   : L"no",
+               progressRectValid ? L"yes" : L"no",
+               progressScreenRect.left, progressScreenRect.top,
+               progressScreenRect.right, progressScreenRect.bottom,
+               progressHostRectValid ? L"yes" : L"no",
+               progressHostRect.left, progressHostRect.top,
+               progressHostRect.right, progressHostRect.bottom);
+
+        RECT clientRect{};
+        RECT windowRect{};
+        bool hostIsWindow = hostWindow && IsWindow(hostWindow);
+        bool clientValid = hostIsWindow && GetClientRect(hostWindow, &clientRect);
+        bool windowValid = hostIsWindow && GetWindowRect(hostWindow, &windowRect);
+        Wh_Log(L"MODE[%llu] %s OperationStatusWindow hwnd=%p isWindow=%s "
+               L"clientValid=%s client=%ldx%ld windowValid=%s window=%ldx%ld",
+               transitionId, phase,
+               reinterpret_cast<void *>(hostWindow),
+               hostIsWindow ? L"yes" : L"no",
+               clientValid ? L"yes" : L"no",
+               clientRect.right - clientRect.left,
+               clientRect.bottom - clientRect.top,
+               windowValid ? L"yes" : L"no",
+               windowRect.right - windowRect.left,
+               windowRect.bottom - windowRect.top);
+    }
+
+    void ScheduleDeferredDisplaySnapshot(COperationStatusTile *owner,
+                                         unsigned long long transitionId,
+                                         bool requestedExpanded)
+    {
+        if (!g_logDisplayStateMessage)
+        {
+            return;
+        }
+
+        TransferSummaryState state{};
+        if (!CopyRegisteredTransferState(owner, &state) || !state.tile ||
+            !state.operationTileRoot)
+        {
+            Wh_Log(L"MODE[%llu] DEFERRED schedule-skipped "
+                   L"reason=tile-not-registered",
+                   transitionId);
+            return;
+        }
+
+        HWND progressWindow =
+            OperationTileElement_GetProgressHWND_Original(state.tile);
+        HWND hostWindow = progressWindow && IsWindow(progressWindow)
+                              ? GetAncestor(progressWindow, GA_ROOT)
+                              : GetRegisteredCircleHost(state.tile);
+        DWORD currentThreadId = GetCurrentThreadId();
+        if (!hostWindow || !IsWindow(hostWindow) ||
+            GetWindowThreadProcessId(hostWindow, nullptr) != currentThreadId)
+        {
+            Wh_Log(L"MODE[%llu] DEFERRED schedule-skipped "
+                   L"reason=invalid-or-cross-thread-host host=%p thread=%lu",
+                   transitionId, reinterpret_cast<void *>(hostWindow),
+                   currentThreadId);
+            return;
+        }
+
+        DeferredDisplaySnapshot snapshot{
+            owner, state.tile, state.operationTileRoot, hostWindow,
+            currentThreadId, transitionId, requestedExpanded};
+        {
+            std::lock_guard<std::mutex> lock(g_displayDiagnosticMutex);
+            g_deferredDisplaySnapshots.push_back(snapshot);
+        }
+
+        if (!PostMessageW(hostWindow, g_logDisplayStateMessage,
+                          static_cast<WPARAM>(transitionId), 0))
+        {
+            DWORD error = GetLastError();
+            std::lock_guard<std::mutex> lock(g_displayDiagnosticMutex);
+            g_deferredDisplaySnapshots.erase(
+                std::remove_if(
+                    g_deferredDisplaySnapshots.begin(),
+                    g_deferredDisplaySnapshots.end(),
+                    [transitionId](DeferredDisplaySnapshot const &candidate)
+                    { return candidate.transitionId == transitionId; }),
+                g_deferredDisplaySnapshots.end());
+            Wh_Log(L"MODE[%llu] DEFERRED PostMessage failed error=%lu",
+                   transitionId, error);
+        }
+    }
+
+    void HandleDeferredDisplaySnapshot(HWND hostWindow,
+                                       unsigned long long transitionId)
+    {
+        DeferredDisplaySnapshot snapshot{};
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(g_displayDiagnosticMutex);
+            auto it = std::find_if(
+                g_deferredDisplaySnapshots.begin(),
+                g_deferredDisplaySnapshots.end(),
+                [hostWindow, transitionId](
+                    DeferredDisplaySnapshot const &candidate)
+                {
+                    return candidate.hostWindow == hostWindow &&
+                           candidate.transitionId == transitionId;
+                });
+            if (it != g_deferredDisplaySnapshots.end())
+            {
+                snapshot = *it;
+                g_deferredDisplaySnapshots.erase(it);
+                found = true;
+            }
+        }
+
+        if (!found)
+        {
+            Wh_Log(L"MODE[%llu] DEFERRED snapshot-skipped "
+                   L"reason=request-not-found host=%p",
+                   transitionId, reinterpret_cast<void *>(hostWindow));
+            return;
+        }
+
+        TransferSummaryState currentState{};
+        HWND currentHostWindow = nullptr;
+        bool currentRegistration =
+            CopyRegisteredTransferState(snapshot.owner, &currentState) &&
+            currentState.tile == snapshot.tile &&
+            currentState.operationTileRoot == snapshot.operationTileRoot &&
+            currentState.displayModeKnown &&
+            currentState.expanded == snapshot.requestedExpanded &&
+            GetCurrentThreadId() == snapshot.uiThreadId &&
+            GetUniqueRegisteredCircleHost(currentState.tile,
+                                          &currentHostWindow) &&
+            currentHostWindow == hostWindow && IsWindow(hostWindow) &&
+            GetWindowThreadProcessId(hostWindow, nullptr) ==
+                snapshot.uiThreadId;
+        if (!currentRegistration)
+        {
+            Wh_Log(L"MODE[%llu] DEFERRED layout-skipped "
+                   L"reason=stale-registration host=%p",
+                   transitionId, reinterpret_cast<void *>(hostWindow));
+            return;
+        }
+
+        bool applyResult =
+            ApplyDisplayMode(snapshot.owner, true, transitionId);
+        LogDisplayState(snapshot.owner, transitionId, L"DEFERRED",
+                        snapshot.requestedExpanded, &snapshot);
+        LogFinalDisplayInvariant(snapshot.owner, hostWindow,
+                                 snapshot.requestedExpanded, applyResult,
+                                 transitionId);
+    }
+
     int GetStoredCirclePercent(OperationTileElement *tile)
     {
         std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -1409,8 +2776,6 @@ namespace
             { return state.tile == tile; });
         return it != g_circles.end() ? it->progressPercent : -1;
     }
-
-    void ApplyDisplayMode(COperationStatusTile *owner);
 
     void RegisterTransferSummary(COperationStatusTile *owner,
                                  OperationTileElement *tile,
@@ -1436,10 +2801,18 @@ namespace
             }
         }
 
-        // SetTileDisplayMode can run during construction before the tile root
-        // is registered with the mod. Reapply the remembered native mode now
-        // that the DirectUI descendants are available.
-        ApplyDisplayMode(owner);
+        HWND hostWindow = tile ? GetRegisteredCircleHost(tile) : nullptr;
+        Wh_Log(L"REGISTER owner=%p tile=%p operationRoot=%p headerRoot=%p "
+               L"host=%p thread=%lu",
+               reinterpret_cast<void *>(owner),
+               reinterpret_cast<void *>(tile),
+               reinterpret_cast<void *>(operationTileRoot),
+               reinterpret_cast<void *>(tileHeaderRoot),
+               reinterpret_cast<void *>(hostWindow), GetCurrentThreadId());
+
+        // Reapply only state already associated with this exact live owner.
+        // Unregistered display-mode subobject pointers are never retained.
+        InitializeRegisteredDisplayMode(owner);
     }
 
     void RemoveTransferSummary(OperationTileElement *tile)
@@ -1507,7 +2880,685 @@ namespace
         // stable while eltSummary keeps the custom body text.
     }
 
-    void ApplyDisplayMode(COperationStatusTile *owner)
+    void ApplyNativeDisplayRate(COperationStatusTile *owner)
+    {
+        TransferSummaryState state{};
+        if (!CopyRegisteredTransferState(owner, &state) ||
+            !state.nativeDisplayRateValid || !state.tile)
+        {
+            return;
+        }
+
+        // The custom info panel renders speed from the native Shell rate.
+        // Do not repurpose Explorer's item-name link/value pair anymore.
+        InvalidateInfoPanelForTile(state.tile);
+    }
+
+    void ApplyNativeDisplayRatesForHost(HWND hostWindow)
+    {
+        std::vector<TransferSummaryState> states;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            states = g_transferSummaries;
+        }
+        for (TransferSummaryState const &state : states)
+        {
+            HWND registeredHost = nullptr;
+            if (state.nativeDisplayRateValid && state.owner && state.tile &&
+                GetUniqueRegisteredCircleHost(state.tile, &registeredHost) &&
+                registeredHost == hostWindow)
+            {
+                ApplyNativeDisplayRate(state.owner);
+            }
+        }
+    }
+
+    void RecordNativeDisplayRateForCurrentThread(double nativeDisplayRate)
+    {
+        std::vector<TransferSummaryState> states;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            states = g_transferSummaries;
+        }
+
+        COperationStatusTile *owner = nullptr;
+        OperationTileElement *tile = nullptr;
+        HWND matchedHostWindow = nullptr;
+        size_t matches = 0;
+        DWORD currentThreadId = GetCurrentThreadId();
+        for (TransferSummaryState const &state : states)
+        {
+            HWND hostWindow = nullptr;
+            if (!state.owner || !state.tile || !state.operationTileRoot ||
+                !GetUniqueRegisteredCircleHost(state.tile, &hostWindow) ||
+                !hostWindow || !IsWindow(hostWindow) ||
+                GetWindowThreadProcessId(hostWindow, nullptr) !=
+                    currentThreadId ||
+                !IsSingleNormalProgressTileForHost(state.tile, hostWindow))
+            {
+                continue;
+            }
+            owner = state.owner;
+            tile = state.tile;
+            matchedHostWindow = hostWindow;
+            ++matches;
+        }
+        if (matches != 1)
+        {
+            return;
+        }
+
+        bool recorded = false;
+        bool firstNativeRate = false;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner, tile](TransferSummaryState const &candidate)
+                {
+                    return candidate.owner == owner &&
+                           candidate.tile == tile;
+                });
+            if (it != g_transferSummaries.end())
+            {
+                firstNativeRate = !it->nativeDisplayRateValid;
+                it->nativeDisplayRate = nativeDisplayRate;
+                it->nativeDisplayRateValid = true;
+                it->nativeRateHistory.push_back(nativeDisplayRate);
+                if (it->nativeRateHistory.size() >
+                    kInfoPanelRateHistorySamples)
+                {
+                    it->nativeRateHistory.erase(
+                        it->nativeRateHistory.begin(),
+                        it->nativeRateHistory.begin() +
+                            (it->nativeRateHistory.size() -
+                             kInfoPanelRateHistorySamples));
+                }
+                recorded = true;
+            }
+        }
+        if (recorded)
+        {
+            if (firstNativeRate)
+            {
+                Wh_Log(L"NATIVE_RATE owner=%p tile=%p bytesPerSecond=%llu "
+                       L"source=COperationStatusTileRateCalculator::_CalculateRate",
+                       reinterpret_cast<void *>(owner),
+                       reinterpret_cast<void *>(tile),
+                       static_cast<unsigned long long>(
+                           nativeDisplayRate + 0.5));
+            }
+            ScheduleProgressCirclePosition(matchedHostWindow,
+                                           L"native-rate");
+        }
+    }
+
+    struct NormalProgressLayoutElements
+    {
+        DirectUI::Element *descriptionHeader;
+        DirectUI::Element *summary;
+        DirectUI::Element *details;
+        DirectUI::Element *speedLabel;
+        DirectUI::Element *speedValue;
+        DirectUI::Element *timeRemainingLabel;
+        DirectUI::Element *timeRemaining;
+        DirectUI::Element *itemsRemainingLabel;
+        DirectUI::Element *itemsRemaining;
+        DirectUI::Element *chartArea;
+        DirectUI::Element *rateChart;
+        DirectUI::Element *progressBarContainer;
+        DirectUI::Element *progressBar;
+        DirectUI::Element *regularTile;
+    };
+
+    bool DiscoverNormalProgressLayout(
+        TransferSummaryState const &state,
+        NormalProgressLayoutElements *elements)
+    {
+        elements->descriptionHeader = state.tileHeaderRoot;
+        elements->summary = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltSummary", false);
+        elements->details = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltDetails", false);
+        elements->speedLabel = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltItemNameLabel", false);
+        elements->speedValue = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltItemName", false);
+        elements->timeRemainingLabel = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltTimeRemainingLabel", false);
+        elements->timeRemaining = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltTimeRemaining", false);
+        elements->itemsRemainingLabel = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltItemsRemainingLabel", false);
+        elements->itemsRemaining = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltItemsRemaining", false);
+        elements->chartArea = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltChartArea", false);
+        elements->rateChart = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltRateChart_New", false);
+        elements->progressBarContainer = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltProgressBarContainer", false);
+        elements->progressBar = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltProgressBar", false);
+        elements->regularTile = FindSkinElement(
+            state.operationTileRoot, state.tileHeaderRoot,
+            L"eltRegularTile", false);
+        return elements->descriptionHeader && elements->summary &&
+               elements->details && elements->speedLabel &&
+               elements->speedValue && elements->timeRemainingLabel &&
+               elements->timeRemaining && elements->itemsRemainingLabel &&
+               elements->itemsRemaining && elements->chartArea &&
+               elements->rateChart && elements->progressBarContainer &&
+               elements->progressBar && elements->regularTile;
+    }
+
+    bool IsElementDescendantOf(DirectUI::Element *element,
+                               DirectUI::Element *ancestor)
+    {
+        constexpr unsigned int kMaximumAncestryDepth = 32;
+        DirectUI::Element *visited[kMaximumAncestryDepth]{};
+
+        if (!element || !ancestor)
+        {
+            return false;
+        }
+
+        for (unsigned int depth = 0; depth < kMaximumAncestryDepth; ++depth)
+        {
+            if (!element)
+            {
+                return false;
+            }
+            for (unsigned int index = 0; index < depth; ++index)
+            {
+                if (visited[index] == element)
+                {
+                    return false;
+                }
+            }
+            visited[depth] = element;
+
+            if (element == ancestor)
+            {
+                return true;
+            }
+            element = Element_GetParent_Original(element);
+        }
+        return false;
+    }
+
+    bool ValidateNormalProgressHierarchy(
+        NormalProgressLayoutElements const &elements,
+        unsigned long long transitionId,
+        bool logResult = true)
+    {
+        auto getParent = [](DirectUI::Element *element)
+        {
+            return element ? Element_GetParent_Original(element) : nullptr;
+        };
+
+        DirectUI::Element *headerParent = getParent(elements.descriptionHeader);
+        DirectUI::Element *summaryParent = getParent(elements.summary);
+        DirectUI::Element *detailsParent = getParent(elements.details);
+        DirectUI::Element *speedLabelParent = getParent(elements.speedLabel);
+        DirectUI::Element *speedValueParent = getParent(elements.speedValue);
+        DirectUI::Element *timeLabelParent =
+            getParent(elements.timeRemainingLabel);
+        DirectUI::Element *timeValueParent =
+            getParent(elements.timeRemaining);
+        DirectUI::Element *itemsLabelParent =
+            getParent(elements.itemsRemainingLabel);
+        DirectUI::Element *itemsValueParent =
+            getParent(elements.itemsRemaining);
+        DirectUI::Element *chartAreaParent = getParent(elements.chartArea);
+        DirectUI::Element *rateChartParent = getParent(elements.rateChart);
+        DirectUI::Element *progressContainerParent =
+            getParent(elements.progressBarContainer);
+        DirectUI::Element *progressBarParent = getParent(elements.progressBar);
+
+        bool headerUnderRegular = IsElementDescendantOf(
+            elements.descriptionHeader, elements.regularTile);
+        bool summaryUnderRegular = IsElementDescendantOf(
+            elements.summary, elements.regularTile);
+        bool detailsUnderRegular = IsElementDescendantOf(
+            elements.details, elements.regularTile);
+        bool speedLabelUnderDetails = IsElementDescendantOf(
+            elements.speedLabel, elements.details);
+        bool speedValueUnderDetails = IsElementDescendantOf(
+            elements.speedValue, elements.details);
+        bool timeLabelUnderDetails = IsElementDescendantOf(
+            elements.timeRemainingLabel, elements.details);
+        bool timeValueUnderDetails = IsElementDescendantOf(
+            elements.timeRemaining, elements.details);
+        bool itemsLabelUnderDetails = IsElementDescendantOf(
+            elements.itemsRemainingLabel, elements.details);
+        bool itemsValueUnderDetails = IsElementDescendantOf(
+            elements.itemsRemaining, elements.details);
+        bool chartAreaUnderDetails = IsElementDescendantOf(
+            elements.chartArea, elements.details);
+        bool rateChartUnderChartArea = IsElementDescendantOf(
+            elements.rateChart, elements.chartArea);
+        bool progressContainerUnderRegular = IsElementDescendantOf(
+            elements.progressBarContainer, elements.regularTile);
+        bool progressBarUnderContainer = IsElementDescendantOf(
+            elements.progressBar, elements.progressBarContainer);
+
+        bool valid = headerUnderRegular && summaryUnderRegular &&
+                     detailsUnderRegular && speedLabelUnderDetails &&
+                     speedValueUnderDetails && timeLabelUnderDetails &&
+                     timeValueUnderDetails && itemsLabelUnderDetails &&
+                     itemsValueUnderDetails && chartAreaUnderDetails &&
+                     rateChartUnderChartArea &&
+                     progressContainerUnderRegular &&
+                     progressBarUnderContainer;
+
+        if (logResult)
+        {
+            auto passFail = [](bool passed)
+            { return passed ? L"PASS" : L"FAIL"; };
+            Wh_Log(
+                L"MODE[%llu] HIERARCHY "
+                L"headerUnderRegular=%s parent=%p "
+                L"summaryUnderRegular=%s parent=%p "
+                L"detailsUnderRegular=%s parent=%p "
+                L"speedLabelUnderDetails=%s parent=%p "
+                L"speedValueUnderDetails=%s parent=%p "
+                L"timeLabelUnderDetails=%s parent=%p "
+                L"timeValueUnderDetails=%s parent=%p "
+                L"itemsLabelUnderDetails=%s parent=%p "
+                L"itemsValueUnderDetails=%s parent=%p "
+                L"chartAreaUnderDetails=%s parent=%p "
+                L"rateChartUnderChartArea=%s parent=%p "
+                L"progressContainerUnderRegular=%s parent=%p "
+                L"progressBarUnderContainer=%s parent=%p result=%s",
+                transitionId, passFail(headerUnderRegular),
+                reinterpret_cast<void *>(headerParent),
+                passFail(summaryUnderRegular),
+                reinterpret_cast<void *>(summaryParent),
+                passFail(detailsUnderRegular),
+                reinterpret_cast<void *>(detailsParent),
+                passFail(speedLabelUnderDetails),
+                reinterpret_cast<void *>(speedLabelParent),
+                passFail(speedValueUnderDetails),
+                reinterpret_cast<void *>(speedValueParent),
+                passFail(timeLabelUnderDetails),
+                reinterpret_cast<void *>(timeLabelParent),
+                passFail(timeValueUnderDetails),
+                reinterpret_cast<void *>(timeValueParent),
+                passFail(itemsLabelUnderDetails),
+                reinterpret_cast<void *>(itemsLabelParent),
+                passFail(itemsValueUnderDetails),
+                reinterpret_cast<void *>(itemsValueParent),
+                passFail(chartAreaUnderDetails),
+                reinterpret_cast<void *>(chartAreaParent),
+                passFail(rateChartUnderChartArea),
+                reinterpret_cast<void *>(rateChartParent),
+                passFail(progressContainerUnderRegular),
+                reinterpret_cast<void *>(progressContainerParent),
+                passFail(progressBarUnderContainer),
+                reinterpret_cast<void *>(progressBarParent),
+                valid ? L"PASS" : L"FAIL");
+
+            auto logFailedChain = [transitionId](PCWSTR relationship,
+                                                  DirectUI::Element *element,
+                                                  bool passed)
+            {
+                if (passed)
+                {
+                    return;
+                }
+
+                constexpr unsigned int kMaximumAncestryDepth = 32;
+                DirectUI::Element *visited[kMaximumAncestryDepth]{};
+                std::wstring chain;
+                for (unsigned int depth = 0;
+                     depth < kMaximumAncestryDepth; ++depth)
+                {
+                    if (!element)
+                    {
+                        chain += chain.empty() ? L"null" : L" -> null";
+                        break;
+                    }
+
+                    bool repeated = false;
+                    for (unsigned int index = 0; index < depth; ++index)
+                    {
+                        if (visited[index] == element)
+                        {
+                            repeated = true;
+                            break;
+                        }
+                    }
+                    if (repeated)
+                    {
+                        chain += L" -> LOOP";
+                        break;
+                    }
+                    visited[depth] = element;
+
+                    wchar_t pointerText[32]{};
+                    std::swprintf(pointerText, ARRAYSIZE(pointerText),
+                                  L"%p",
+                                  reinterpret_cast<void *>(element));
+                    if (!chain.empty())
+                    {
+                        chain += L" -> ";
+                    }
+                    chain += pointerText;
+                    element = Element_GetParent_Original(element);
+                }
+
+                Wh_Log(L"MODE[%llu] HIERARCHY_CHAIN relationship=%s "
+                       L"chain=%s",
+                       transitionId, relationship, chain.c_str());
+            };
+
+            logFailedChain(L"headerUnderRegular",
+                           elements.descriptionHeader,
+                           headerUnderRegular);
+            logFailedChain(L"summaryUnderRegular", elements.summary,
+                           summaryUnderRegular);
+            logFailedChain(L"detailsUnderRegular", elements.details,
+                           detailsUnderRegular);
+            logFailedChain(L"speedLabelUnderDetails", elements.speedLabel,
+                           speedLabelUnderDetails);
+            logFailedChain(L"speedValueUnderDetails", elements.speedValue,
+                           speedValueUnderDetails);
+            logFailedChain(L"timeLabelUnderDetails",
+                           elements.timeRemainingLabel,
+                           timeLabelUnderDetails);
+            logFailedChain(L"timeValueUnderDetails", elements.timeRemaining,
+                           timeValueUnderDetails);
+            logFailedChain(L"itemsLabelUnderDetails",
+                           elements.itemsRemainingLabel,
+                           itemsLabelUnderDetails);
+            logFailedChain(L"itemsValueUnderDetails", elements.itemsRemaining,
+                           itemsValueUnderDetails);
+            logFailedChain(L"chartAreaUnderDetails", elements.chartArea,
+                           chartAreaUnderDetails);
+            logFailedChain(L"rateChartUnderChartArea", elements.rateChart,
+                           rateChartUnderChartArea);
+            logFailedChain(L"progressContainerUnderRegular",
+                           elements.progressBarContainer,
+                           progressContainerUnderRegular);
+            logFailedChain(L"progressBarUnderContainer", elements.progressBar,
+                           progressBarUnderContainer);
+        }
+        return valid;
+    }
+
+    bool IsElementEffectivelyVisible(DirectUI::Element *element)
+    {
+        constexpr unsigned int kMaximumAncestryDepth = 32;
+        DirectUI::Element *visited[kMaximumAncestryDepth]{};
+
+        if (!element)
+        {
+            return false;
+        }
+
+        for (unsigned int depth = 0; depth < kMaximumAncestryDepth; ++depth)
+        {
+            for (unsigned int index = 0; index < depth; ++index)
+            {
+                if (visited[index] == element)
+                {
+                    return false;
+                }
+            }
+            visited[depth] = element;
+
+            if (!Element_GetVisible_Original(element))
+            {
+                return false;
+            }
+
+            DirectUI::Element *parent =
+                Element_GetParent_Original(element);
+            if (!parent)
+            {
+                return true;
+            }
+            element = parent;
+        }
+
+        return false;
+    }
+
+    struct ElementInvariantState
+    {
+        bool effectiveVisible;
+        bool boundsValid;
+        RECT bounds;
+    };
+
+    ElementInvariantState CaptureElementInvariant(
+        DirectUI::Element *element)
+    {
+        ElementInvariantState state{};
+        if (!element)
+        {
+            return state;
+        }
+
+        state.effectiveVisible = IsElementEffectivelyVisible(element);
+        state.boundsValid = SUCCEEDED(
+            Element_GetRootRelativeBounds_Original(element, &state.bounds));
+        return state;
+    }
+
+    bool HasNonzeroBounds(ElementInvariantState const &state)
+    {
+        return state.boundsValid &&
+               state.bounds.right > state.bounds.left &&
+               state.bounds.bottom > state.bounds.top;
+    }
+
+    struct RowInvariantState
+    {
+        bool effectiveVisible;
+        bool boundsValid;
+        bool leavesNonzero;
+        RECT bounds;
+    };
+
+    RowInvariantState CaptureRowInvariant(DirectUI::Element *label,
+                                          DirectUI::Element *value)
+    {
+        ElementInvariantState labelState = CaptureElementInvariant(label);
+        ElementInvariantState valueState = CaptureElementInvariant(value);
+        RowInvariantState row{};
+        row.effectiveVisible = labelState.effectiveVisible &&
+                               valueState.effectiveVisible;
+        row.boundsValid = labelState.boundsValid && valueState.boundsValid;
+        row.leavesNonzero = HasNonzeroBounds(labelState) &&
+                            HasNonzeroBounds(valueState);
+        if (row.boundsValid)
+        {
+            row.bounds.left = std::min(labelState.bounds.left,
+                                       valueState.bounds.left);
+            row.bounds.top = std::min(labelState.bounds.top,
+                                      valueState.bounds.top);
+            row.bounds.right = std::max(labelState.bounds.right,
+                                        valueState.bounds.right);
+            row.bounds.bottom = std::max(labelState.bounds.bottom,
+                                         valueState.bounds.bottom);
+        }
+        return row;
+    }
+
+    bool IsSingleNormalProgressTileForHost(OperationTileElement *tile,
+                                           HWND hostWindow)
+    {
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        size_t hostTiles = 0;
+        size_t matchingTiles = 0;
+        for (CircleState const &circle : g_circles)
+        {
+            if (circle.hostWindow == hostWindow)
+            {
+                ++hostTiles;
+                if (circle.tile == tile)
+                {
+                    ++matchingTiles;
+                }
+            }
+        }
+        return hostTiles == 1 && matchingTiles == 1;
+    }
+
+    bool CalculateCustomHostWindowHeight(HWND hostWindow,
+                                         bool expanded,
+                                         int *targetWindowHeight,
+                                         int *targetClientHeight = nullptr)
+    {
+        RECT windowRect{};
+        RECT clientRect{};
+        UINT dpi = GetDpiForWindow(hostWindow);
+        if (!dpi || !GetWindowRect(hostWindow, &windowRect) ||
+            !GetClientRect(hostWindow, &clientRect))
+        {
+            return false;
+        }
+
+        int logicalClientHeight = kCustomCommonClientHeight +
+                                  (expanded
+                                       ? kExpandedChartSectionHeight
+                                       : 0);
+        int scaledClientHeight = ScaleForDpi(logicalClientHeight, dpi);
+        int windowHeight = windowRect.bottom - windowRect.top;
+        int clientHeight = clientRect.bottom - clientRect.top;
+        *targetWindowHeight =
+            scaledClientHeight + (windowHeight - clientHeight);
+        if (targetClientHeight)
+        {
+            *targetClientHeight = scaledClientHeight;
+        }
+        return true;
+    }
+
+    bool GetVerifiedCustomHostWindowHeight(HWND hostWindow,
+                                           int nativeWindowHeight,
+                                           int *targetWindowHeight)
+    {
+        (void)nativeWindowHeight;
+
+        std::vector<TransferSummaryState> states;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            states = g_transferSummaries;
+        }
+
+        TransferSummaryState match{};
+        size_t matches = 0;
+        for (TransferSummaryState const &state : states)
+        {
+            if (!state.displayModeKnown || !state.tile ||
+                !state.operationTileRoot)
+            {
+                continue;
+            }
+
+            HWND registeredHost = nullptr;
+            if (GetUniqueRegisteredCircleHost(state.tile, &registeredHost) &&
+                registeredHost == hostWindow)
+            {
+                match = state;
+                ++matches;
+            }
+        }
+        if (matches != 1 ||
+            !IsSingleNormalProgressTileForHost(match.tile, hostWindow))
+        {
+            return false;
+        }
+
+        NormalProgressLayoutElements elements{};
+        if (!DiscoverNormalProgressLayout(match, &elements) ||
+            !ValidateNormalProgressHierarchy(elements, 0, false))
+        {
+            return false;
+        }
+
+        return CalculateCustomHostWindowHeight(
+            hostWindow, match.expanded, targetWindowHeight);
+    }
+
+    bool ResizeOperationStatusWindowForMode(
+        HWND hostWindow,
+        bool expanded,
+        unsigned long long transitionId)
+    {
+        RECT windowRect{};
+        RECT clientRect{};
+        int targetWindowHeight = 0;
+        int targetClientHeight = 0;
+        if (!GetWindowRect(hostWindow, &windowRect) ||
+            !GetClientRect(hostWindow, &clientRect) ||
+            !CalculateCustomHostWindowHeight(
+                hostWindow, expanded, &targetWindowHeight,
+                &targetClientHeight))
+        {
+            Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT resize-failed host=%p "
+                   L"reason=window-rect error=%lu",
+                   transitionId, reinterpret_cast<void *>(hostWindow),
+                   GetLastError());
+            return false;
+        }
+
+        int windowWidth = windowRect.right - windowRect.left;
+        int windowHeight = windowRect.bottom - windowRect.top;
+
+        if (windowHeight != targetWindowHeight &&
+            !SetWindowPos(hostWindow, nullptr, 0, 0, windowWidth,
+                          targetWindowHeight,
+                          SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE))
+        {
+            Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT resize-failed host=%p "
+                   L"targetClientHeight=%d targetWindowHeight=%d error=%lu",
+                   transitionId, reinterpret_cast<void *>(hostWindow),
+                   targetClientHeight, targetWindowHeight, GetLastError());
+            return false;
+        }
+
+        RECT windowAfter{};
+        RECT clientAfter{};
+        if (!GetWindowRect(hostWindow, &windowAfter) ||
+            !GetClientRect(hostWindow, &clientAfter))
+        {
+            return false;
+        }
+        int actualWindowHeight = windowAfter.bottom - windowAfter.top;
+        int actualClientHeight = clientAfter.bottom - clientAfter.top;
+        bool sizeVerified = actualWindowHeight == targetWindowHeight &&
+                            actualClientHeight == targetClientHeight;
+
+        Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT host=%p expanded=%s "
+               L"targetClientHeight=%d actualClientHeight=%d "
+               L"targetWindowHeight=%d actualWindowHeight=%d result=%s",
+               transitionId, reinterpret_cast<void *>(hostWindow),
+               expanded ? L"true" : L"false",
+               targetClientHeight, actualClientHeight,
+               targetWindowHeight, actualWindowHeight,
+               sizeVerified ? L"verified" : L"rejected");
+        return sizeVerified;
+    }
+
+    bool ApplyDisplayMode(COperationStatusTile *owner,
+                          bool applyFinalHostGeometry,
+                          unsigned long long transitionId)
     {
         TransferSummaryState state{};
         {
@@ -1517,73 +3568,344 @@ namespace
                 [owner](TransferSummaryState const &candidate)
                 { return candidate.owner == owner; });
             if (it == g_transferSummaries.end() || !it->displayModeKnown ||
-                !it->operationTileRoot)
+                !it->tile || !it->operationTileRoot)
             {
-                return;
+                return false;
             }
             state = *it;
         }
 
-        DirectUI::Element *progressBar = FindSkinElement(
-            state.operationTileRoot, state.tileHeaderRoot,
-            L"eltProgressBar", false);
-        DirectUI::Element *chartArea = FindSkinElement(
-            state.operationTileRoot, state.tileHeaderRoot,
-            L"eltChartArea", false);
-        DirectUI::Element *rateChart = FindSkinElement(
-            state.operationTileRoot, state.tileHeaderRoot,
-            L"eltRateChart_New", false);
-
-        // Keep the two presentations mutually exclusive. Explorer's expanded
-        // mode gets the speed-history graph; compact mode gets the straight
-        // progress bar. This also removes the useless black bar that was
-        // showing underneath the graph when both presentations were visible.
-        if (progressBar)
+        HWND hostWindow = nullptr;
+        if (!GetUniqueRegisteredCircleHost(state.tile, &hostWindow) ||
+            !hostWindow || !IsWindow(hostWindow) ||
+            GetWindowThreadProcessId(hostWindow, nullptr) !=
+                GetCurrentThreadId() ||
+            !IsSingleNormalProgressTileForHost(state.tile, hostWindow))
         {
-            Element_SetVisible_Original(progressBar, !state.expanded);
-        }
-        if (chartArea)
-        {
-            Element_SetVisible_Original(chartArea, state.expanded);
-        }
-        if (rateChart)
-        {
-            Element_SetVisible_Original(rateChart, state.expanded);
+            Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT owner=%p result=skipped "
+                   L"reason=invalid-or-multiple-tile-host",
+                   transitionId, reinterpret_cast<void *>(owner));
+            return false;
         }
 
-        Wh_Log(L"display-mode owner=%p expanded=%s chart=%s progressBar=%s",
-               reinterpret_cast<void *>(owner),
-               state.expanded ? L"yes" : L"no",
-               state.expanded ? L"visible" : L"hidden",
-               state.expanded ? L"hidden" : L"visible");
+        NormalProgressLayoutElements elements{};
+        if (!DiscoverNormalProgressLayout(state, &elements) ||
+            !ValidateNormalProgressHierarchy(elements, transitionId))
+        {
+            Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT owner=%p result=skipped "
+                   L"reason=not-normal-progress-structure",
+                   transitionId, reinterpret_cast<void *>(owner));
+            return false;
+        }
+
+        bool visibilityApplied = true;
+        auto setVisible = [&visibilityApplied](DirectUI::Element *element,
+                                               bool visible)
+        {
+            HRESULT result = Element_SetVisible_Original(element, visible);
+            visibilityApplied =
+                SUCCEEDED(result) && visibilityApplied;
+            return result;
+        };
+
+        // Keep the native header/summary and action controls, but stop asking
+        // DirectUI to host the common status rows. A transparent custom child
+        // window renders Speed/Time/Items/completion progress using data from
+        // Explorer's own progress/byte/rate callbacks. Expanded mode only
+        // changes that custom panel by adding the rate-history chart.
+        HRESULT descriptionResult =
+            setVisible(elements.descriptionHeader, true);
+        HRESULT summaryResult = setVisible(elements.summary, true);
+        HRESULT detailsResult = setVisible(elements.details, false);
+        HRESULT progressContainerResult =
+            setVisible(elements.progressBarContainer, false);
+        HRESULT progressResult = setVisible(elements.progressBar, false);
+        HRESULT chartAreaResult = setVisible(elements.chartArea, false);
+        HRESULT rateChartResult = setVisible(elements.rateChart, false);
+        HRESULT regularHeightResult =
+            Element_SetRelPixHeight_Original(
+                elements.regularTile,
+                state.expanded ? kExpandedRegularTileHeight
+                               : kCompactRegularTileHeight);
+
+        HWND progressWindow =
+            OperationTileElement_GetProgressHWND_Original(state.tile);
+        if (progressWindow && IsWindow(progressWindow) &&
+            IsWindowVisible(progressWindow))
+        {
+            ShowWindow(progressWindow, SW_HIDE);
+        }
+        bool nativeProgressHidden =
+            !progressWindow || !IsWindow(progressWindow) ||
+            !IsWindowVisible(progressWindow);
+
+        bool geometryApplied =
+            !applyFinalHostGeometry ||
+            ResizeOperationStatusWindowForMode(
+                hostWindow, state.expanded, transitionId);
+
+        PositionInfoPanel(state.tile);
+        HWND infoWindow = GetInfoPanelWindowForTile(state.tile);
+        bool infoVisible = infoWindow && IsWindow(infoWindow) &&
+                           IsWindowVisible(infoWindow);
+        if (infoWindow && IsWindow(infoWindow))
+        {
+            InvalidateRect(infoWindow, nullptr, FALSE);
+        }
+
+        bool nativeDetailsHidden =
+            !Element_GetVisible_Original(elements.details);
+        bool nativeProgressContainerHidden =
+            !Element_GetVisible_Original(elements.progressBarContainer);
+        bool nativeProgressHiddenElement =
+            !Element_GetVisible_Original(elements.progressBar);
+        bool nativeChartHidden =
+            !Element_GetVisible_Original(elements.chartArea) &&
+            !Element_GetVisible_Original(elements.rateChart);
+
+        bool success =
+            visibilityApplied && SUCCEEDED(regularHeightResult) &&
+            geometryApplied && infoVisible &&
+            nativeDetailsHidden && nativeProgressContainerHidden &&
+            nativeProgressHiddenElement && nativeProgressHidden &&
+            nativeChartHidden;
+
+        Wh_Log(L"MODE[%llu] CUSTOM_PANEL owner=%p expanded=%s "
+               L"descriptionSet=0x%08X summarySet=0x%08X "
+               L"detailsSet=0x%08X progressContainerSet=0x%08X "
+               L"progressSet=0x%08X chartSet=0x%08X rateChartSet=0x%08X "
+               L"regularHeightSet=0x%08X infoHwnd=%p infoVisible=%s "
+               L"nativeProgressHidden=%s finalGeometry=%s result=%s",
+               transitionId, reinterpret_cast<void *>(owner),
+               state.expanded ? L"true" : L"false",
+               static_cast<unsigned int>(descriptionResult),
+               static_cast<unsigned int>(summaryResult),
+               static_cast<unsigned int>(detailsResult),
+               static_cast<unsigned int>(progressContainerResult),
+               static_cast<unsigned int>(progressResult),
+               static_cast<unsigned int>(chartAreaResult),
+               static_cast<unsigned int>(rateChartResult),
+               static_cast<unsigned int>(regularHeightResult),
+               reinterpret_cast<void *>(infoWindow),
+               infoVisible ? L"yes" : L"no",
+               nativeProgressHidden ? L"yes" : L"no",
+               applyFinalHostGeometry ? L"yes" : L"no",
+               success ? L"success" : L"failure");
+
+        return success;
     }
 
-    void RecordDisplayMode(COperationStatusTile *owner, bool expanded)
+    void LogFinalDisplayInvariant(COperationStatusTile *owner,
+                                  HWND hostWindow,
+                                  bool expanded,
+                                  bool applyResult,
+                                  unsigned long long transitionId)
     {
+        TransferSummaryState state{};
+        NormalProgressLayoutElements elements{};
+        bool stateValid = CopyRegisteredTransferState(owner, &state) &&
+                          state.tile && state.operationTileRoot;
+        bool elementsFound = stateValid &&
+                             DiscoverNormalProgressLayout(state, &elements);
+        bool hierarchyValid = elementsFound &&
+                              ValidateNormalProgressHierarchy(
+                                  elements, transitionId, false);
+
+        HWND infoWindow =
+            stateValid ? GetInfoPanelWindowForTile(state.tile) : nullptr;
+        RECT infoRect{};
+        bool infoVisible =
+            infoWindow && IsWindow(infoWindow) &&
+            IsWindowVisible(infoWindow);
+        bool infoRectValid =
+            infoVisible && GetWindowRect(infoWindow, &infoRect);
+        if (infoRectValid && hostWindow && IsWindow(hostWindow))
+        {
+            SetLastError(ERROR_SUCCESS);
+            int mapResult = MapWindowPoints(
+                HWND_DESKTOP, hostWindow,
+                reinterpret_cast<POINT *>(&infoRect), 2);
+            infoRectValid =
+                mapResult != 0 || GetLastError() == ERROR_SUCCESS;
+        }
+
+        RECT windowBounds{};
+        RECT clientBounds{};
+        bool windowBoundsValid = hostWindow && IsWindow(hostWindow) &&
+                                 GetWindowRect(hostWindow, &windowBounds) &&
+                                 GetClientRect(hostWindow, &clientBounds);
+        int actualWindowWidth = windowBoundsValid
+                                    ? windowBounds.right - windowBounds.left
+                                    : 0;
+        int actualWindowHeight = windowBoundsValid
+                                     ? windowBounds.bottom - windowBounds.top
+                                     : 0;
+        int actualClientWidth = windowBoundsValid
+                                    ? clientBounds.right - clientBounds.left
+                                    : 0;
+        int actualClientHeight = windowBoundsValid
+                                     ? clientBounds.bottom - clientBounds.top
+                                     : 0;
+
+        int targetWindowHeight = 0;
+        int targetClientHeight = 0;
+        bool targetHeightValid = windowBoundsValid &&
+                                 CalculateCustomHostWindowHeight(
+                                     hostWindow, expanded,
+                                     &targetWindowHeight,
+                                     &targetClientHeight);
+        bool customHeightActive =
+            targetHeightValid &&
+            actualWindowHeight == targetWindowHeight &&
+            actualClientHeight == targetClientHeight;
+
+        bool headerVisible = elementsFound &&
+                             IsElementEffectivelyVisible(
+                                 elements.descriptionHeader);
+        bool summaryVisible = elementsFound &&
+                              IsElementEffectivelyVisible(elements.summary);
+        bool nativeDetailsHidden =
+            !elementsFound ||
+            !IsElementEffectivelyVisible(elements.details);
+        bool nativeProgressHidden =
+            !elementsFound ||
+            (!IsElementEffectivelyVisible(elements.progressBarContainer) &&
+             !IsElementEffectivelyVisible(elements.progressBar));
+        bool nativeChartHidden =
+            !elementsFound ||
+            (!IsElementEffectivelyVisible(elements.chartArea) &&
+             !IsElementEffectivelyVisible(elements.rateChart));
+
+        UINT dpi = hostWindow && IsWindow(hostWindow)
+                       ? GetDpiForWindow(hostWindow)
+                       : USER_DEFAULT_SCREEN_DPI;
+        int expectedInfoHeight = ScaleForDpi(
+            expanded ? kInfoPanelExpandedHeight
+                     : kInfoPanelCommonHeight,
+            dpi ? dpi : USER_DEFAULT_SCREEN_DPI);
+        bool infoGeometryValid =
+            infoRectValid &&
+            infoRect.right > infoRect.left &&
+            infoRect.bottom - infoRect.top == expectedInfoHeight;
+
+        bool pass = applyResult && hierarchyValid && headerVisible &&
+                    summaryVisible && infoVisible && infoGeometryValid &&
+                    nativeDetailsHidden && nativeProgressHidden &&
+                    nativeChartHidden && customHeightActive;
+
+        Wh_Log(
+            L"MODE[%llu] FINAL_INVARIANT expanded=%s applyResult=%s "
+            L"hierarchyValid=%s header=%s summary=%s "
+            L"customPanel=%s rectValid=%s rect=[%ld,%ld,%ld,%ld] "
+            L"nativeDetailsHidden=%s nativeProgressHidden=%s "
+            L"nativeChartHidden=%s window=%dx%d client=%dx%d "
+            L"targetWindowHeight=%d targetClientHeight=%d "
+            L"customHeight=%s result=%s",
+            transitionId, expanded ? L"true" : L"false",
+            applyResult ? L"success" : L"failure",
+            hierarchyValid ? L"yes" : L"no",
+            headerVisible ? L"visible" : L"hidden",
+            summaryVisible ? L"visible" : L"hidden",
+            infoVisible ? L"visible" : L"hidden",
+            infoRectValid ? L"yes" : L"no",
+            infoRect.left, infoRect.top, infoRect.right, infoRect.bottom,
+            nativeDetailsHidden ? L"yes" : L"no",
+            nativeProgressHidden ? L"yes" : L"no",
+            nativeChartHidden ? L"yes" : L"no",
+            actualWindowWidth, actualWindowHeight,
+            actualClientWidth, actualClientHeight,
+            targetWindowHeight, targetClientHeight,
+            customHeightActive ? L"active" : L"inactive",
+            pass ? L"PASS" : L"FAIL");
+    }
+
+    void InitializeRegisteredDisplayMode(COperationStatusTile *owner)
+    {
+        TransferSummaryState state{};
+        if (!CopyRegisteredTransferState(owner, &state) || !state.tile ||
+            !state.operationTileRoot)
+        {
+            return;
+        }
+
+        NormalProgressLayoutElements elements{};
+        if (!DiscoverNormalProgressLayout(state, &elements))
+        {
+            return;
+        }
+
+        bool detailsVisible = Element_GetVisible_Original(elements.details);
+        bool progressBarVisible =
+            Element_GetVisible_Original(elements.progressBar);
+        // The transition diagnostics established this paired native signature
+        // on the target build. Do not infer initial mode from host geometry or
+        // from chart visibility, which this mod itself intentionally changes.
+        bool nativeCompact = !detailsVisible && progressBarVisible;
+        bool nativeExpanded = detailsVisible && !progressBarVisible;
+        if (!nativeCompact && !nativeExpanded)
+        {
+            Wh_Log(L"INITIAL_MODE owner=%p result=skipped "
+                   L"reason=unrecognized-native-visibility",
+                   reinterpret_cast<void *>(owner));
+            return;
+        }
+
+        bool expanded = nativeExpanded;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner](TransferSummaryState const &candidate)
+                { return candidate.owner == owner; });
+            if (it == g_transferSummaries.end() || it->tile != state.tile ||
+                it->operationTileRoot != state.operationTileRoot)
+            {
+                return;
+            }
+            it->displayModeKnown = true;
+            it->expanded = expanded;
+        }
+
+        unsigned long long transitionId = ++g_displayTransitionSequence;
+        Wh_Log(L"MODE[%llu] INITIAL_MODE owner=%p expanded=%s result=matched",
+               transitionId, reinterpret_cast<void *>(owner),
+               expanded ? L"true" : L"false");
+        ApplyDisplayMode(owner, false, transitionId);
+        ScheduleDeferredDisplaySnapshot(owner, transitionId, expanded);
+    }
+
+    void RecordDisplayMode(COperationStatusTile *owner,
+                           bool expanded,
+                           unsigned long long transitionId)
+    {
+        bool recorded = false;
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
             auto it = std::find_if(
                 g_transferSummaries.begin(), g_transferSummaries.end(),
                 [owner](TransferSummaryState const &state)
                 { return state.owner == owner; });
-            if (it == g_transferSummaries.end())
-            {
-                g_transferSummaries.push_back(
-                    {owner, nullptr, nullptr, nullptr, 0, 0, false, {}, true, expanded});
-            }
-            else
+            if (it != g_transferSummaries.end() && it->tile &&
+                it->operationTileRoot)
             {
                 it->displayModeKnown = true;
                 it->expanded = expanded;
+                recorded = true;
             }
         }
-        ApplyDisplayMode(owner);
+        if (recorded)
+        {
+            ApplyDisplayMode(owner, false, transitionId);
+        }
     }
 
     void RecordTransferBytes(COperationStatusTile *owner,
+                             unsigned long long completedItems,
+                             unsigned long long totalItems,
                              unsigned long long completedBytes,
                              unsigned long long totalBytes)
     {
+        OperationTileElement *tile = nullptr;
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
             auto it = std::find_if(
@@ -1594,11 +3916,19 @@ namespace
             {
                 return;
             }
+            it->completedItems = completedItems;
+            it->totalItems = totalItems;
+            it->itemsValid = true;
             it->completedBytes = completedBytes;
             it->totalBytes = totalBytes;
             it->bytesValid = true;
+            tile = it->tile;
         }
         ApplyTransferSummary(owner);
+        if (tile)
+        {
+            InvalidateInfoPanelForTile(tile);
+        }
     }
 
     void RecordNativeSummary(COperationStatusTile *owner, PCWSTR summary)
@@ -1684,7 +4014,7 @@ namespace
                               unsigned long long eventId,
                               NativeProgressSnapshot const &progress)
     {
-        if (!tile || !g_circleClassAtom)
+        if (!tile || !g_circleClassAtom || !g_infoPanelClassAtom)
         {
             return false;
         }
@@ -1779,10 +4109,22 @@ namespace
             return false;
         }
 
+        HWND infoWindow = CreateWindowExW(
+            WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOPARENTNOTIFY,
+            kInfoPanelWindowClass, nullptr, WS_CHILD | WS_CLIPSIBLINGS,
+            0, 0, 1, 1, hostWindow, nullptr, g_circleClassInstance, nullptr);
+        if (!infoWindow)
+        {
+            Wh_Log(L"eventId=%llu info-panel CreateWindowExW failed error=%lu",
+                   eventId, GetLastError());
+            DestroyWindow(circleWindow);
+            return false;
+        }
+
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
             g_circles.push_back(
-                {tile, circleWindow, progressWindow, hostWindow,
+                {tile, circleWindow, infoWindow, progressWindow, hostWindow,
                  progress.percent, progress.rangeLow, progress.rangeHigh,
                  true, progress.rangeValid, eventId, 0, 0, 0, 0, false});
         }
@@ -1808,11 +4150,13 @@ namespace
 
         ScheduleProgressCirclePosition(hostWindow, L"tile-added");
         InvalidateRect(circleWindow, nullptr, FALSE);
+        InvalidateRect(infoWindow, nullptr, FALSE);
         Wh_Log(L"eventId=%llu circle created tile=%p host=%p progressHwnd=%p "
-               L"hostSubclass=%s progressSubclass=%s result=%s",
+               L"infoHwnd=%p hostSubclass=%s progressSubclass=%s result=%s",
                eventId, reinterpret_cast<void *>(tile),
                reinterpret_cast<void *>(hostWindow),
                reinterpret_cast<void *>(progressWindow),
+               reinterpret_cast<void *>(infoWindow),
                hostSubclassed ? L"yes" : L"no",
                progressSubclassed ? L"yes" : L"no",
                hostSubclassed && progressSubclassed ? L"success" : L"failure");
@@ -1840,6 +4184,7 @@ namespace
             ReadNativeProgress(progressWindow, fallbackPercent);
         EnsureProgressCircle(tile, 0, progress);
         RefreshTransferSummaryForTile(tile);
+        InvalidateInfoPanelForTile(tile);
         SyncHostCaptionFromCircle(tile, progress.percent);
     }
 
@@ -1871,6 +4216,10 @@ namespace
                                  NativeProgressWindowSubclassProc,
                                  kProgressWindowSubclassId);
         }
+        if (removed.infoWindow && IsWindow(removed.infoWindow))
+        {
+            DestroyWindow(removed.infoWindow);
+        }
         if (removed.circleWindow && IsWindow(removed.circleWindow))
         {
             DestroyWindow(removed.circleWindow);
@@ -1885,14 +4234,36 @@ namespace
     void DestroyAllProgressCircles()
     {
         std::vector<HWND> circleWindows;
+        std::vector<HWND> infoWindows;
         std::vector<HWND> hosts;
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
             for (auto const &state : g_circles)
             {
                 circleWindows.push_back(state.circleWindow);
+                infoWindows.push_back(state.infoWindow);
             }
             hosts = g_subclassedHosts;
+        }
+
+        for (HWND infoWindow : infoWindows)
+        {
+            if (infoWindow && IsWindow(infoWindow))
+            {
+                DWORD windowThread =
+                    GetWindowThreadProcessId(infoWindow, nullptr);
+                if (windowThread == GetCurrentThreadId())
+                {
+                    DestroyWindow(infoWindow);
+                }
+                else
+                {
+                    DWORD_PTR ignored;
+                    SendMessageTimeoutW(
+                        infoWindow, WM_CLOSE, 0, 0,
+                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &ignored);
+                }
+            }
         }
 
         for (HWND circleWindow : circleWindows)
@@ -1975,6 +4346,9 @@ namespace
                    GetLastError());
             Gdiplus::GdiplusShutdown(g_gdiplusToken);
             g_gdiplusToken = 0;
+            g_removeHostSubclassMessage = 0;
+            g_positionCirclesMessage = 0;
+            g_logDisplayStateMessage = 0;
             return false;
         }
         g_positionCirclesMessage = RegisterWindowMessageW(
@@ -1990,6 +4364,20 @@ namespace
             return false;
         }
 
+        g_logDisplayStateMessage = RegisterWindowMessageW(
+            L"Windhawk.FileOperationStyler.LogDisplayState.0.10.41");
+        if (!g_logDisplayStateMessage)
+        {
+            Wh_Log(L"Diagnostic setup failed: display-state "
+                   L"RegisterWindowMessageW error=%lu",
+                   GetLastError());
+            Gdiplus::GdiplusShutdown(g_gdiplusToken);
+            g_gdiplusToken = 0;
+            g_removeHostSubclassMessage = 0;
+            g_positionCirclesMessage = 0;
+            return false;
+        }
+
         HMODULE circleModule = nullptr;
         if (!GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -2001,6 +4389,9 @@ namespace
                    GetLastError());
             Gdiplus::GdiplusShutdown(g_gdiplusToken);
             g_gdiplusToken = 0;
+            g_removeHostSubclassMessage = 0;
+            g_positionCirclesMessage = 0;
+            g_logDisplayStateMessage = 0;
             return false;
         }
         g_circleClassInstance = circleModule;
@@ -2017,15 +4408,50 @@ namespace
                    GetLastError());
             Gdiplus::GdiplusShutdown(g_gdiplusToken);
             g_gdiplusToken = 0;
+            g_removeHostSubclassMessage = 0;
+            g_positionCirclesMessage = 0;
+            g_logDisplayStateMessage = 0;
             return false;
         }
-        Wh_Log(L"circle renderer=memory-dc");
+
+        WNDCLASSEXW infoClass{};
+        infoClass.cbSize = sizeof(infoClass);
+        infoClass.style = CS_HREDRAW | CS_VREDRAW;
+        infoClass.lpfnWndProc = InfoPanelWindowProc;
+        infoClass.hInstance = g_circleClassInstance;
+        infoClass.lpszClassName = kInfoPanelWindowClass;
+        g_infoPanelClassAtom = RegisterClassExW(&infoClass);
+        if (!g_infoPanelClassAtom)
+        {
+            Wh_Log(L"Info-panel setup failed: RegisterClassExW error=%lu",
+                   GetLastError());
+            UnregisterClassW(kCircleWindowClass, g_circleClassInstance);
+            g_circleClassAtom = 0;
+            Gdiplus::GdiplusShutdown(g_gdiplusToken);
+            g_gdiplusToken = 0;
+            g_removeHostSubclassMessage = 0;
+            g_positionCirclesMessage = 0;
+            g_logDisplayStateMessage = 0;
+            return false;
+        }
+
+        Wh_Log(L"circle renderer=memory-dc info-panel=memory-dc");
         return true;
     }
 
     void ShutdownProgressCircleUi()
     {
         DestroyAllProgressCircles();
+        if (g_infoPanelClassAtom)
+        {
+            if (!UnregisterClassW(kInfoPanelWindowClass,
+                                  g_circleClassInstance))
+            {
+                Wh_Log(L"Info-panel cleanup: UnregisterClassW failed error=%lu",
+                       GetLastError());
+            }
+            g_infoPanelClassAtom = 0;
+        }
         if (g_circleClassAtom)
         {
             if (!UnregisterClassW(kCircleWindowClass,
@@ -2043,6 +4469,11 @@ namespace
         }
         g_removeHostSubclassMessage = 0;
         g_positionCirclesMessage = 0;
+        g_logDisplayStateMessage = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_displayDiagnosticMutex);
+            g_deferredDisplaySnapshots.clear();
+        }
     }
 
     void __cdecl OperationTileElement_OnPropertyChanged_Hook(
@@ -2087,7 +4518,8 @@ namespace
                 totalBytes);
         if (SUCCEEDED(result))
         {
-            RecordTransferBytes(thisPtr, completedBytes, totalBytes);
+            RecordTransferBytes(thisPtr, completedItems, totalItems,
+                                completedBytes, totalBytes);
         }
         return result;
     }
@@ -2105,15 +4537,72 @@ namespace
         return result;
     }
 
+    double __cdecl COperationStatusTileRateCalculator_CalculateRate_Hook(
+        COperationStatusTileRateCalculator *thisPtr,
+        unsigned long long value1,
+        unsigned long long value2,
+        unsigned long long value3,
+        unsigned long long value4,
+        unsigned long long value5,
+        unsigned long long value6,
+        unsigned long long value7,
+        double *secondaryRate)
+    {
+        double result = COperationStatusTileRateCalculator_CalculateRate_Original(
+            thisPtr, value1, value2, value3, value4, value5, value6,
+            value7, secondaryRate);
+        if (std::isfinite(result) && result >= 0.0 &&
+            result <= static_cast<double>(
+                          std::numeric_limits<LONGLONG>::max()))
+        {
+            RecordNativeDisplayRateForCurrentThread(result);
+        }
+        return result;
+    }
+
     HRESULT __cdecl COperationStatusTile_SetTileDisplayMode_Hook(
         COperationStatusTile *thisPtr,
         bool expanded)
     {
+        unsigned long long transitionId = ++g_displayTransitionSequence;
+        LogRegisteredTransferStatesForDisplayMode(thisPtr, transitionId);
+
+        COperationStatusTile *canonicalOwner = nullptr;
+        bool ownerResolved = ResolveDisplayModeOwner(
+            thisPtr, transitionId, &canonicalOwner);
+        COperationStatusTile *snapshotOwner =
+            ownerResolved ? canonicalOwner : thisPtr;
+        LogDisplayState(snapshotOwner, transitionId, L"BEFORE_NATIVE",
+                        expanded);
+
         HRESULT result = COperationStatusTile_SetTileDisplayMode_Original(
             thisPtr, expanded);
-        if (SUCCEEDED(result))
+
+        COperationStatusTile *postNativeOwner = nullptr;
+        bool ownerStillResolved =
+            ownerResolved &&
+            ResolveDisplayModeOwner(thisPtr, transitionId,
+                                    &postNativeOwner, false) &&
+            postNativeOwner == canonicalOwner;
+        snapshotOwner = ownerStillResolved ? canonicalOwner : thisPtr;
+        LogDisplayState(snapshotOwner, transitionId, L"AFTER_NATIVE",
+                        expanded);
+
+        if (SUCCEEDED(result) && ownerStillResolved)
         {
-            RecordDisplayMode(thisPtr, expanded);
+            RecordDisplayMode(canonicalOwner, expanded, transitionId);
+        }
+        LogDisplayState(snapshotOwner, transitionId, L"AFTER_MOD", expanded);
+        if (ownerStillResolved)
+        {
+            ScheduleDeferredDisplaySnapshot(canonicalOwner, transitionId,
+                                            expanded);
+        }
+        else
+        {
+            Wh_Log(L"MODE[%llu] DEFERRED schedule-skipped "
+                   L"reason=owner-resolution-failed",
+                   transitionId);
         }
         return result;
     }
@@ -2121,6 +4610,7 @@ namespace
     void __cdecl OperationTileElement_Destructor_Hook(
         OperationTileElement *thisPtr)
     {
+        CancelDeferredDisplaySnapshotsForTile(thisPtr);
         RemoveTransferSummary(thisPtr);
         DestroyProgressCircle(thisPtr);
         OperationTileElement_Destructor_Original(thisPtr);
@@ -2599,25 +5089,6 @@ namespace
             Element_SetBorderThickness_Original(element, 0, 0, 0, 0);
         }
 
-        // Deliberate visual pass using only verified native DirectUI
-        // descendants. Keep their existing parents/order intact.
-        for (PCWSTR name : {L"eltItemNameLabel", L"eltItemName"})
-        {
-            DirectUI::Element *element = FindSkinElement(
-                operationTileRoot, state.tileHeaderRoot, name, false);
-            if (!element)
-            {
-                continue;
-            }
-            HRESULT visibleResult =
-                Element_SetVisible_Original(element, false);
-            if (FAILED(visibleResult))
-            {
-                LogSetterFailure(eventId, name, L"visible=false",
-                                 visibleResult);
-            }
-        }
-
         DirectUI::Element *chartArea = FindSkinElement(
             operationTileRoot, state.tileHeaderRoot, L"eltChartArea", false);
         if (chartArea)
@@ -2628,7 +5099,9 @@ namespace
             HRESULT heightResult = Element_SetRelPixHeight_Original(
                 chartArea, kChartAreaHeight);
             HRESULT marginResult =
-                Element_SetMargin_Original(chartArea, 0, 4, 0, 3);
+                Element_SetMargin_Original(
+                    chartArea, 0, kChartAreaTopMargin, 0,
+                    kChartAreaBottomMargin);
             if (FAILED(backgroundResult))
             {
                 LogSetterFailure(eventId, L"eltChartArea", L"background",
@@ -2675,11 +5148,9 @@ namespace
             }
         }
 
-        // Let Explorer keep its native compact/expanded presentation switch:
-        // compact mode uses eltProgressBar, while expanded mode uses the
-        // details/chart presentation. Do not force visibility in either mode.
-        // We only style the compact linear bar so it can act as the secondary
-        // progress indicator beneath the circle, matching the target layout.
+        // Visibility is applied by ApplyDisplayMode after Explorer records its
+        // native compact/expanded state. Keep the shared linear-bar styling
+        // here so both custom modes use identical upper-area geometry.
         DirectUI::Element *progressBar = FindSkinElement(
             operationTileRoot, state.tileHeaderRoot, L"eltProgressBar", false);
         if (progressBar)
@@ -2700,9 +5171,8 @@ namespace
             }
         }
 
-        // Keep the expanded details group compact. Explorer still owns the
-        // compact/expanded visibility switch; this only tightens the expanded
-        // graph + detail rows when More details is active.
+        // Keep the shared details group compact. ApplyDisplayMode keeps this
+        // container visible in both modes because it owns the time/items rows.
         DirectUI::Element *details = FindSkinElement(
             operationTileRoot, state.tileHeaderRoot, L"eltDetails", false);
         if (details)
@@ -2735,6 +5205,8 @@ namespace
             int weight;
         };
         constexpr DetailTarget detailTargets[] = {
+            {L"eltItemNameLabel", kSecondaryTextColor, 14, 400},
+            {L"eltItemName", kPrimaryTextColor, 14, 500},
             {L"eltTimeRemainingLabel", kSecondaryTextColor, 14, 400},
             {L"eltTimeRemaining", kPrimaryTextColor, 14, 500},
             {L"eltItemsRemainingLabel", kSecondaryTextColor, 14, 400},
@@ -2759,6 +5231,7 @@ namespace
             HRESULT weightResult =
                 Element_SetFontWeight_Original(element, target.weight);
             bool isLabel =
+                lstrcmpW(target.name, L"eltItemNameLabel") == 0 ||
                 lstrcmpW(target.name, L"eltTimeRemainingLabel") == 0 ||
                 lstrcmpW(target.name, L"eltItemsRemainingLabel") == 0;
             HRESULT marginResult = Element_SetMargin_Original(
@@ -2859,6 +5332,7 @@ namespace
         DUIXmlParser_CreateElement_t parserCreate;
         StrToID_t strToID;
         Element_FindDescendent_t findDescendent;
+        Element_GetParent_t getParent;
         Element_SetBackgroundColor_t setBackgroundColor;
         Element_SetForegroundColor_t setForegroundColor;
         Element_SetFontFace_t setFontFace;
@@ -2870,6 +5344,7 @@ namespace
         Element_SetBorderColor_t setBorderColor;
         Element_SetBorderThickness_t setBorderThickness;
         Element_SetVisible_t setVisible;
+        Element_GetVisible_t getVisible;
         Element_SetRelPixHeight_t setRelPixHeight;
         Element_SetContentString_t setContentString;
         Element_GetRootRelativeBounds_t getRootRelativeBounds;
@@ -2882,6 +5357,7 @@ namespace
             updateRemainingItemsAndSize;
         COperationStatusTile_UpdateSummary_t updateSummary;
         COperationStatusTile_SetTileDisplayMode_t setTileDisplayMode;
+        COperationStatusTileRateCalculator_CalculateRate_t calculateRate;
     };
 
     bool ResolveSkinTargets(SkinTargets *targets)
@@ -2900,6 +5376,8 @@ namespace
             "?CreateElement@DUIXmlParser@DirectUI@@QEAAJPEBGPEAVElement@2@1PEAKPEAPEAV32@@Z";
         constexpr PCSTR findDescendentSymbol =
             "?FindDescendent@Element@DirectUI@@QEAAPEAV12@G@Z";
+        constexpr PCSTR getParentSymbol =
+            "?GetParent@Element@DirectUI@@QEAAPEAV12@XZ";
         constexpr PCSTR setBackgroundColorSymbol =
             "?SetBackgroundColor@Element@DirectUI@@QEAAJK@Z";
         constexpr PCSTR setForegroundColorSymbol =
@@ -2922,6 +5400,8 @@ namespace
             "?SetBorderThickness@Element@DirectUI@@QEAAJHHHH@Z";
         constexpr PCSTR setVisibleSymbol =
             "?SetVisible@Element@DirectUI@@QEAAJ_N@Z";
+        constexpr PCSTR getVisibleSymbol =
+            "?GetVisible@Element@DirectUI@@QEAA_NXZ";
         constexpr PCSTR setRelPixHeightSymbol =
             "?SetRelPixHeight@Element@DirectUI@@QEAAJH@Z";
         constexpr PCSTR setContentStringSymbol =
@@ -2937,6 +5417,8 @@ namespace
         targets->findDescendent =
             reinterpret_cast<Element_FindDescendent_t>(
                 GetProcAddress(dui70, findDescendentSymbol));
+        targets->getParent = reinterpret_cast<Element_GetParent_t>(
+            GetProcAddress(dui70, getParentSymbol));
         targets->setBackgroundColor =
             reinterpret_cast<Element_SetBackgroundColor_t>(
                 GetProcAddress(dui70, setBackgroundColorSymbol));
@@ -2961,6 +5443,8 @@ namespace
             GetProcAddress(dui70, setBorderThicknessSymbol));
         targets->setVisible = reinterpret_cast<Element_SetVisible_t>(
             GetProcAddress(dui70, setVisibleSymbol));
+        targets->getVisible = reinterpret_cast<Element_GetVisible_t>(
+            GetProcAddress(dui70, getVisibleSymbol));
         targets->setRelPixHeight =
             reinterpret_cast<Element_SetRelPixHeight_t>(
                 GetProcAddress(dui70, setRelPixHeightSymbol));
@@ -2972,26 +5456,30 @@ namespace
                 GetProcAddress(dui70, getRootRelativeBoundsSymbol));
 
         if (!targets->parserCreate || !targets->strToID ||
-            !targets->findDescendent || !targets->setBackgroundColor ||
+            !targets->findDescendent || !targets->getParent ||
+            !targets->setBackgroundColor ||
             !targets->setForegroundColor || !targets->setFontFace ||
             !targets->setFontSize || !targets->setFontWeight ||
             !targets->setRelPixWidth || !targets->setMargin ||
             !targets->setPadding || !targets->setBorderColor ||
             !targets->setBorderThickness || !targets->setVisible ||
-            !targets->setRelPixHeight || !targets->setContentString ||
+            !targets->getVisible || !targets->setRelPixHeight ||
+            !targets->setContentString ||
             !targets->getRootRelativeBounds)
         {
             Wh_Log(L"Skin setup failed: required dui70 exports missing "
                    L"ParserCreate=%p StrToID=%p FindDescendent=%p "
+                   L"GetParent=%p "
                    L"SetBackgroundColor=%p SetForegroundColor=%p "
                    L"SetFontFace=%p SetFontSize=%p SetFontWeight=%p "
                    L"SetRelPixWidth=%p SetMargin=%p SetPadding=%p "
                    L"SetBorderColor=%p SetBorderThickness=%p "
-                   L"SetVisible=%p SetRelPixHeight=%p "
+                   L"SetVisible=%p GetVisible=%p SetRelPixHeight=%p "
                    L"GetRootRelativeBounds=%p",
                    reinterpret_cast<void *>(targets->parserCreate),
                    reinterpret_cast<void *>(targets->strToID),
                    reinterpret_cast<void *>(targets->findDescendent),
+                   reinterpret_cast<void *>(targets->getParent),
                    reinterpret_cast<void *>(targets->setBackgroundColor),
                    reinterpret_cast<void *>(targets->setForegroundColor),
                    reinterpret_cast<void *>(targets->setFontFace),
@@ -3003,6 +5491,7 @@ namespace
                    reinterpret_cast<void *>(targets->setBorderColor),
                    reinterpret_cast<void *>(targets->setBorderThickness),
                    reinterpret_cast<void *>(targets->setVisible),
+                   reinterpret_cast<void *>(targets->getVisible),
                    reinterpret_cast<void *>(targets->setRelPixHeight),
                    reinterpret_cast<void *>(targets->getRootRelativeBounds));
             return false;
@@ -3067,6 +5556,12 @@ namespace
                 nullptr,
                 false,
             },
+            {
+                {LR"(?_CalculateRate@COperationStatusTileRateCalculator@@AEAAN_K000000PEAN@Z)"},
+                &targets->calculateRate,
+                nullptr,
+                false,
+            },
         };
 
         WH_HOOK_SYMBOLS_OPTIONS options{};
@@ -3079,7 +5574,7 @@ namespace
             !targets->getProgressHWND || !targets->onPropertyChanged ||
             !targets->operationTileDestructor ||
             !targets->updateRemainingItemsAndSize || !targets->updateSummary ||
-            !targets->setTileDisplayMode)
+            !targets->setTileDisplayMode || !targets->calculateRate)
         {
             Wh_Log(L"Skin setup failed: unable to resolve exact "
                    L"file-operation symbols CreateTile=%p ProgressProp=%p "
@@ -3099,6 +5594,7 @@ namespace
     {
         StrToID_Original = targets.strToID;
         Element_FindDescendent_Original = targets.findDescendent;
+        Element_GetParent_Original = targets.getParent;
         Element_SetBackgroundColor_Original = targets.setBackgroundColor;
         Element_SetForegroundColor_Original = targets.setForegroundColor;
         Element_SetFontFace_Original = targets.setFontFace;
@@ -3110,6 +5606,7 @@ namespace
         Element_SetBorderColor_Original = targets.setBorderColor;
         Element_SetBorderThickness_Original = targets.setBorderThickness;
         Element_SetVisible_Original = targets.setVisible;
+        Element_GetVisible_Original = targets.getVisible;
         Element_SetRelPixHeight_Original = targets.setRelPixHeight;
         Element_SetContentString_Original = targets.setContentString;
         Element_GetRootRelativeBounds_Original =
@@ -3185,6 +5682,15 @@ namespace
             return false;
         }
 
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.calculateRate,
+                COperationStatusTileRateCalculator_CalculateRate_Hook,
+                &COperationStatusTileRateCalculator_CalculateRate_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook native rate update");
+            return false;
+        }
+
         return true;
     }
 
@@ -3192,7 +5698,7 @@ namespace
 
 BOOL Wh_ModInit()
 {
-    Wh_Log(L"File Operation Styler 0.10.40 initialization started");
+    Wh_Log(L"File Operation Styler 0.10.41 initialization started");
 
     if (!InitializeProgressCircleUi())
     {
@@ -3206,7 +5712,7 @@ BOOL Wh_ModInit()
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 0.10.40 ready");
+    Wh_Log(L"File Operation Styler 0.10.41 ready");
     return TRUE;
 }
 
@@ -3218,5 +5724,5 @@ void Wh_ModUninit()
         g_transferSummaries.clear();
     }
     ClearSkinState();
-    Wh_Log(L"File Operation Styler 0.10.40 uninitialization complete");
+    Wh_Log(L"File Operation Styler 0.10.41 uninitialization complete");
 }
