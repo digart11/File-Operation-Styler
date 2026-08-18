@@ -2,7 +2,7 @@
 // @id              file-operation-styler
 // @name            File Operation Styler
 // @description     Experimental dark skin for native file-operation tiles.
-// @version         0.10.41
+// @version         0.10.50
 // @author          digART
 // @license         GPL-3.0
 // @include         explorer.exe
@@ -366,7 +366,7 @@ namespace
     constexpr COLORREF kSecondaryTextColor = RGB(154, 163, 174);
     constexpr int kRequestedTileWidth = 550;
     constexpr int kReservedLeftWidth = 156;
-    constexpr int kContentTopPadding = 4;
+    constexpr int kContentTopPadding = 8;
     constexpr int kContentRightPadding = 10;
     constexpr int kContentBottomPadding = 4;
     constexpr int kTileVerticalMargin = 0;
@@ -377,7 +377,7 @@ namespace
     // Keep the proven ring geometry. The right-side layout is being tightened
     // independently so the graph can remain useful without making the whole
     // window excessively wide.
-    constexpr int kCircleHostY = 4;
+    constexpr int kCircleHostY = 8;
     constexpr int kCircleStrokeWidth = 7;
     constexpr COLORREF kInactiveRingColor = RGB(58, 65, 74);
     constexpr COLORREF kAccentRingColor = RGB(21, 151, 229);
@@ -456,7 +456,7 @@ namespace
     constexpr int kChartAreaHeight = 60;
     constexpr int kChartAreaTopMargin = 4;
     constexpr int kChartAreaBottomMargin = 3;
-    constexpr int kDisplayModeFooterReserveHeight = 28;
+    constexpr int kDisplayModeFooterReserveHeight = 42;
     constexpr int kCustomCommonClientHeight =
         kCircleHostY + kCircleWindowHeight +
         kDisplayModeFooterReserveHeight;
@@ -466,17 +466,25 @@ namespace
     constexpr wchar_t kCircleWindowClass[] =
         L"Windhawk.FileOperationStyler.ProgressCircle.0.10.3";
     constexpr wchar_t kInfoPanelWindowClass[] =
-        L"Windhawk.FileOperationStyler.InfoPanel.0.10.41";
-    constexpr int kInfoPanelTop = 52;
-    constexpr int kInfoPanelCommonHeight = 58;
-    constexpr int kInfoPanelExpandedHeight = 130;
-    constexpr int kInfoPanelTextRowHeight = 18;
-    constexpr int kInfoPanelProgressTop = 43;
+        L"Windhawk.FileOperationStyler.InfoPanel.0.10.50";
+    constexpr int kInfoPanelTop = 72;
+    constexpr int kInfoPanelCommonHeight = 72;
+    constexpr int kInfoPanelExpandedHeight = 144;
+    constexpr int kInfoPanelTextRowHeight = 17;
+    constexpr int kInfoPanelItemsTop = 16;
+    constexpr int kInfoPanelProgressTop = 44;
     constexpr int kInfoPanelProgressHeight = 8;
-    constexpr int kInfoPanelChartTop = 68;
-    constexpr int kInfoPanelChartHeight = 60;
-    constexpr int kCompactRegularTileHeight = 118;
-    constexpr int kExpandedRegularTileHeight = 185;
+    // Keep the expanded graph at the proven absolute position while the
+    // common text/progress group gets more breathing room below Summary.
+    constexpr int kInfoPanelChartLabelTop = 54;
+    constexpr int kInfoPanelChartTop = 70;
+    constexpr int kInfoPanelChartHeight = 52;
+    constexpr int kCompactRegularTileHeight = 136;
+    constexpr int kExpandedRegularTileHeight = 203;
+    constexpr int kInfoPanelCancelWidth = 78;
+    constexpr int kInfoPanelCancelHeight = 26;
+    constexpr int kInfoPanelCancelRightPadding = 16;
+    constexpr int kInfoPanelCancelBottomPadding = 8;
     constexpr size_t kInfoPanelRateHistorySamples = 72;
     constexpr UINT_PTR kHostWindowSubclassId = 0xF0510010;
     constexpr UINT_PTR kProgressWindowSubclassId = 0xF0510011;
@@ -563,6 +571,43 @@ namespace
         return element;
     }
 
+    DirectUI::Element *FindSkinElementWithAncestorFallback(
+        DirectUI::Element *tileRoot,
+        DirectUI::Element *tileHeaderRoot,
+        DirectUI::Element *parentElement,
+        PCWSTR name,
+        bool allowHeaderFallback)
+    {
+        DirectUI::Element *element = FindSkinElement(
+            tileRoot, tileHeaderRoot, name, allowHeaderFallback);
+        if (element)
+        {
+            return element;
+        }
+
+        ATOM id = StrToID_Original(name);
+        if (!id)
+        {
+            return nullptr;
+        }
+
+        // More/Fewer details is outside idOperationTile on this shell build.
+        // Search only the verified CreateTileElement parent chain; do not
+        // broaden the lookup process-wide.
+        DirectUI::Element *searchRoot = parentElement;
+        for (int depth = 0; searchRoot && depth < 6; ++depth)
+        {
+            element = Element_FindDescendent_Original(searchRoot, id);
+            if (element)
+            {
+                return element;
+            }
+            searchRoot = Element_GetParent_Original(searchRoot);
+        }
+
+        return nullptr;
+    }
+
     struct TextSkinResult
     {
         bool foregroundApplied;
@@ -601,6 +646,95 @@ namespace
             SUCCEEDED(foregroundResult),
             SUCCEEDED(fontResult),
         };
+    }
+
+    bool ApplyDisplayModeFooterVisuals(
+        unsigned long long eventId,
+        DirectUI::Element *operationTileRoot,
+        DirectUI::Element *tileHeaderRoot,
+        DirectUI::Element *ancestorStart)
+    {
+        DirectUI::Element *displayModeButton =
+            FindSkinElementWithAncestorFallback(
+                operationTileRoot, tileHeaderRoot,
+                ancestorStart ? ancestorStart : operationTileRoot,
+                L"eltDisplayModeBtn", true);
+        if (!displayModeButton)
+        {
+            return false;
+        }
+
+        // Explorer reapplies the native button/footer visual state during a
+        // More/Fewer details transition. Reapply only these cosmetic values
+        // after each native mode change so the control stays subdued and the
+        // expanded footer separator doesn't come back.
+        HRESULT foregroundResult =
+            Element_SetForegroundColor_Original(
+                displayModeButton, kSecondaryTextColor);
+        HRESULT faceResult = Element_SetFontFace_Original(
+            displayModeButton, L"Segoe UI Variable Text");
+        HRESULT sizeResult =
+            Element_SetFontSize_Original(displayModeButton, 11);
+        HRESULT weightResult =
+            Element_SetFontWeight_Original(displayModeButton, 400);
+
+        if (FAILED(foregroundResult))
+            LogSetterFailure(eventId, L"eltDisplayModeBtn",
+                             L"foreground-footer", foregroundResult);
+        if (FAILED(faceResult))
+            LogSetterFailure(eventId, L"eltDisplayModeBtn",
+                             L"font-face-footer", faceResult);
+        if (FAILED(sizeResult))
+            LogSetterFailure(eventId, L"eltDisplayModeBtn",
+                             L"font-size-footer", sizeResult);
+        if (FAILED(weightResult))
+            LogSetterFailure(eventId, L"eltDisplayModeBtn",
+                             L"font-weight-footer", weightResult);
+
+        DirectUI::Element *footerParent =
+            Element_GetParent_Original(displayModeButton);
+        DirectUI::Element *footerGrandparent =
+            footerParent ? Element_GetParent_Original(footerParent)
+                         : nullptr;
+
+        auto applyFooterContainerVisuals =
+            [eventId](DirectUI::Element *element, PCWSTR name)
+        {
+            if (!element)
+            {
+                return;
+            }
+
+            // Let the chevron/text inherit the same secondary hierarchy when
+            // the shell's button template resolves foreground from a parent.
+            HRESULT parentForeground =
+                Element_SetForegroundColor_Original(
+                    element, kSecondaryTextColor);
+            HRESULT borderColor = Element_SetBorderColor_Original(
+                element, kBackgroundColor);
+            HRESULT borderThickness =
+                Element_SetBorderThickness_Original(element, 0, 0, 0, 0);
+
+            if (FAILED(parentForeground))
+                LogSetterFailure(eventId, name,
+                                 L"foreground-footer-container",
+                                 parentForeground);
+            if (FAILED(borderColor))
+                LogSetterFailure(eventId, name,
+                                 L"border-color-footer", borderColor);
+            if (FAILED(borderThickness))
+                LogSetterFailure(eventId, name,
+                                 L"border-thickness-footer",
+                                 borderThickness);
+        };
+
+        applyFooterContainerVisuals(footerParent,
+                                    L"eltDisplayModeBtnParent");
+        applyFooterContainerVisuals(footerGrandparent,
+                                    L"eltDisplayModeBtnGrandparent");
+
+        return SUCCEEDED(foregroundResult) && SUCCEEDED(faceResult) &&
+               SUCCEEDED(sizeResult) && SUCCEEDED(weightResult);
     }
 
     struct WindowLookupContext
@@ -1042,6 +1176,39 @@ namespace
         }
     }
 
+    void FillCapsule(Gdiplus::Graphics &graphics,
+                     Gdiplus::Brush &brush,
+                     Gdiplus::REAL x,
+                     Gdiplus::REAL y,
+                     Gdiplus::REAL width,
+                     Gdiplus::REAL height)
+    {
+        if (width <= 0.0f || height <= 0.0f)
+        {
+            return;
+        }
+
+        // For very short progress values, keep the fill visually rounded
+        // instead of producing a square sliver. Normal-width bars use true
+        // semicircular end caps.
+        if (width <= height)
+        {
+            graphics.FillEllipse(&brush, x, y, width, height);
+            return;
+        }
+
+        Gdiplus::REAL radius = height / 2.0f;
+        Gdiplus::GraphicsPath path;
+        path.AddArc(x, y, height, height, 90.0f, 180.0f);
+        path.AddLine(x + radius, y, x + width - radius, y);
+        path.AddArc(x + width - height, y, height, height, 270.0f, 180.0f);
+        path.AddLine(x + width - radius, y + height, x + radius, y + height);
+        path.CloseFigure();
+        graphics.FillPath(&brush, &path);
+    }
+
+    void GetInfoPanelCancelRect(HWND infoWindow, RECT *cancelRect);
+
     void DrawInfoPanelFrame(HWND infoWindow,
                             HDC deviceContext,
                             RECT const &clientRect)
@@ -1074,12 +1241,12 @@ namespace
         graphics.FillRectangle(&backgroundBrush, 0, 0, width, height);
 
         Gdiplus::Font detailFont(
-            L"Segoe UI Variable",
-            static_cast<Gdiplus::REAL>(ScaleForDpi(12, dpi)),
+            L"Segoe UI Variable Text",
+            static_cast<Gdiplus::REAL>(ScaleForDpi(11, dpi)),
             Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::Font detailFallback(
             L"Segoe UI",
-            static_cast<Gdiplus::REAL>(ScaleForDpi(12, dpi)),
+            static_cast<Gdiplus::REAL>(ScaleForDpi(11, dpi)),
             Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::Font *selectedFont =
             detailFont.GetLastStatus() == Gdiplus::Ok
@@ -1094,8 +1261,8 @@ namespace
             GetGValue(kSecondaryTextColor), GetBValue(kSecondaryTextColor)));
 
         wchar_t rateSize[64]{};
+        wchar_t rateValue[80]{};
         wchar_t timeText[64]{};
-        wchar_t speedTimeText[192]{};
         if (snapshot.nativeRateValid)
         {
             unsigned long long roundedRate =
@@ -1108,20 +1275,36 @@ namespace
         {
             lstrcpynW(rateSize, L"\x2014", ARRAYSIZE(rateSize));
         }
+        std::swprintf(rateValue, ARRAYSIZE(rateValue), L"%s/s", rateSize);
         FormatRemainingTime(snapshot, timeText, ARRAYSIZE(timeText));
-        std::swprintf(speedTimeText, ARRAYSIZE(speedTimeText),
-                      L"Speed: %s/s  \x2022  Time remaining: %s",
-                      rateSize, timeText);
 
-        Gdiplus::RectF speedBounds(
-            0.0f, 0.0f, static_cast<Gdiplus::REAL>(width),
-            static_cast<Gdiplus::REAL>(
-                ScaleForDpi(kInfoPanelTextRowHeight, dpi)));
-        graphics.DrawString(speedTimeText, -1, selectedFont, speedBounds,
-                            nullptr, &primaryBrush);
+        // Labels stay subdued like the Items remaining row; only the live
+        // transfer values are promoted to the primary foreground.
+        auto drawInlineSegment = [&](PCWSTR text,
+                                     Gdiplus::SolidBrush *brush,
+                                     Gdiplus::REAL y,
+                                     Gdiplus::REAL *x)
+        {
+            if (!text || !*text || !brush || !x)
+            {
+                return;
+            }
+            Gdiplus::PointF origin(*x, y);
+            Gdiplus::RectF measured{};
+            graphics.MeasureString(text, -1, selectedFont, origin, &measured);
+            graphics.DrawString(text, -1, selectedFont, origin, brush);
+            *x += measured.Width;
+        };
+
+        Gdiplus::REAL speedX = 0.0f;
+        drawInlineSegment(L"Speed: ", &secondaryBrush, 0.0f, &speedX);
+        drawInlineSegment(rateValue, &primaryBrush, 0.0f, &speedX);
+        drawInlineSegment(L"  \x2022  Time remaining: ", &secondaryBrush,
+                          0.0f, &speedX);
+        drawInlineSegment(timeText, &primaryBrush, 0.0f, &speedX);
 
         wchar_t remainingSize[64]{};
-        wchar_t itemsText[160]{};
+        wchar_t itemsValue[128]{};
         unsigned long long remainingItems = 0;
         unsigned long long remainingBytes = 0;
         if (snapshot.itemsValid &&
@@ -1139,30 +1322,25 @@ namespace
 
         if (snapshot.itemsValid && snapshot.bytesValid)
         {
-            std::swprintf(itemsText, ARRAYSIZE(itemsText),
-                          L"Items remaining: %llu (%s)", remainingItems,
-                          remainingSize);
+            std::swprintf(itemsValue, ARRAYSIZE(itemsValue), L"%llu (%s)",
+                          remainingItems, remainingSize);
         }
         else if (snapshot.itemsValid)
         {
-            std::swprintf(itemsText, ARRAYSIZE(itemsText),
-                          L"Items remaining: %llu", remainingItems);
+            std::swprintf(itemsValue, ARRAYSIZE(itemsValue), L"%llu",
+                          remainingItems);
         }
         else
         {
-            lstrcpynW(itemsText, L"Items remaining: Calculating...",
-                      ARRAYSIZE(itemsText));
+            lstrcpynW(itemsValue, L"Calculating...", ARRAYSIZE(itemsValue));
         }
 
-        Gdiplus::RectF itemsBounds(
-            0.0f,
-            static_cast<Gdiplus::REAL>(
-                ScaleForDpi(kInfoPanelTextRowHeight + 2, dpi)),
-            static_cast<Gdiplus::REAL>(width),
-            static_cast<Gdiplus::REAL>(
-                ScaleForDpi(kInfoPanelTextRowHeight, dpi)));
-        graphics.DrawString(itemsText, -1, selectedFont, itemsBounds,
-                            nullptr, &secondaryBrush);
+        Gdiplus::REAL itemsX = 0.0f;
+        Gdiplus::REAL itemsY = static_cast<Gdiplus::REAL>(
+            ScaleForDpi(kInfoPanelItemsTop, dpi));
+        drawInlineSegment(L"Items remaining: ", &secondaryBrush, itemsY,
+                          &itemsX);
+        drawInlineSegment(itemsValue, &primaryBrush, itemsY, &itemsX);
 
         Gdiplus::REAL progressTop = static_cast<Gdiplus::REAL>(
             ScaleForDpi(kInfoPanelProgressTop, dpi));
@@ -1176,8 +1354,8 @@ namespace
         Gdiplus::SolidBrush progressFill(Gdiplus::Color(
             255, GetRValue(kAccentRingColor),
             GetGValue(kAccentRingColor), GetBValue(kAccentRingColor)));
-        graphics.FillRectangle(&progressTrack, 0.0f, progressTop,
-                               progressWidth, progressHeight);
+        FillCapsule(graphics, progressTrack, 0.0f, progressTop,
+                    progressWidth, progressHeight);
         Gdiplus::REAL completedWidth =
             progressWidth *
             static_cast<Gdiplus::REAL>(
@@ -1185,8 +1363,37 @@ namespace
             100.0f;
         if (completedWidth > 0.0f)
         {
-            graphics.FillRectangle(&progressFill, 0.0f, progressTop,
-                                   completedWidth, progressHeight);
+            FillCapsule(graphics, progressFill, 0.0f, progressTop,
+                        completedWidth, progressHeight);
+        }
+
+        // Bottom-right Cancel is custom presentation only; activation is
+        // forwarded to Explorer's existing native cancel control. Keeping the
+        // original top-right X intact avoids changing native command ownership.
+        RECT cancelRect{};
+        GetInfoPanelCancelRect(infoWindow, &cancelRect);
+        if (cancelRect.right > cancelRect.left &&
+            cancelRect.bottom > cancelRect.top)
+        {
+            Gdiplus::RectF buttonBounds(
+                static_cast<Gdiplus::REAL>(cancelRect.left),
+                static_cast<Gdiplus::REAL>(cancelRect.top),
+                static_cast<Gdiplus::REAL>(cancelRect.right - cancelRect.left),
+                static_cast<Gdiplus::REAL>(cancelRect.bottom - cancelRect.top));
+            Gdiplus::SolidBrush buttonBrush(Gdiplus::Color(
+                255, GetRValue(kActionSurfaceColor),
+                GetGValue(kActionSurfaceColor), GetBValue(kActionSurfaceColor)));
+            Gdiplus::Pen buttonBorder(Gdiplus::Color(
+                255, GetRValue(kInactiveRingColor),
+                GetGValue(kInactiveRingColor), GetBValue(kInactiveRingColor)),
+                1.0f);
+            graphics.FillRectangle(&buttonBrush, buttonBounds);
+            graphics.DrawRectangle(&buttonBorder, buttonBounds);
+            Gdiplus::StringFormat centered;
+            centered.SetAlignment(Gdiplus::StringAlignmentCenter);
+            centered.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+            graphics.DrawString(L"Cancel", -1, selectedFont, buttonBounds,
+                                &centered, &primaryBrush);
         }
 
         if (!snapshot.expanded)
@@ -1201,6 +1408,40 @@ namespace
         {
             return;
         }
+
+        // Current speed gets its own restrained caption strip above the graph.
+        Gdiplus::Font chartLabelFont(
+            L"Segoe UI Variable Text",
+            static_cast<Gdiplus::REAL>(ScaleForDpi(10, dpi)),
+            Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::Font chartLabelFallback(
+            L"Segoe UI",
+            static_cast<Gdiplus::REAL>(ScaleForDpi(10, dpi)),
+            Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::Font *selectedChartLabelFont =
+            chartLabelFont.GetLastStatus() == Gdiplus::Ok
+                ? &chartLabelFont
+                : &chartLabelFallback;
+        Gdiplus::REAL chartLabelY = static_cast<Gdiplus::REAL>(
+            ScaleForDpi(kInfoPanelChartLabelTop, dpi));
+        Gdiplus::REAL chartSpeedX = 0.0f;
+        auto drawChartSegment = [&](PCWSTR text,
+                                    Gdiplus::SolidBrush *brush)
+        {
+            if (!text || !*text || !brush)
+            {
+                return;
+            }
+            Gdiplus::PointF origin(chartSpeedX, chartLabelY);
+            Gdiplus::RectF measured{};
+            graphics.MeasureString(text, -1, selectedChartLabelFont, origin,
+                                   &measured);
+            graphics.DrawString(text, -1, selectedChartLabelFont, origin,
+                                brush);
+            chartSpeedX += measured.Width;
+        };
+        drawChartSegment(L"Speed: ", &secondaryBrush);
+        drawChartSegment(rateValue, &primaryBrush);
 
         Gdiplus::SolidBrush chartBackground(Gdiplus::Color(
             255, GetRValue(kGraphSurfaceColor),
@@ -1231,8 +1472,27 @@ namespace
             return;
         }
 
+        size_t firstUsableSample = 0;
+        while (firstUsableSample + 1 < snapshot.rateHistory.size())
+        {
+            double rate = snapshot.rateHistory[firstUsableSample];
+            if (std::isfinite(rate) && rate > 0.0)
+            {
+                break;
+            }
+            ++firstUsableSample;
+        }
+
+        std::vector<double> visibleHistory(
+            snapshot.rateHistory.begin() + firstUsableSample,
+            snapshot.rateHistory.end());
+        if (visibleHistory.empty())
+        {
+            return;
+        }
+
         double maximumRate = 1.0;
-        for (double rate : snapshot.rateHistory)
+        for (double rate : visibleHistory)
         {
             if (std::isfinite(rate))
             {
@@ -1240,13 +1500,13 @@ namespace
             }
         }
 
-        size_t sampleCount = snapshot.rateHistory.size();
+        size_t sampleCount = visibleHistory.size();
         std::vector<Gdiplus::PointF> linePoints;
         linePoints.reserve(sampleCount);
         for (size_t index = 0; index < sampleCount; ++index)
         {
-            double rate = std::isfinite(snapshot.rateHistory[index])
-                              ? std::max(0.0, snapshot.rateHistory[index])
+            double rate = std::isfinite(visibleHistory[index])
+                              ? std::max(0.0, visibleHistory[index])
                               : 0.0;
             Gdiplus::REAL x = sampleCount > 1
                                   ? static_cast<Gdiplus::REAL>(
@@ -1346,6 +1606,144 @@ namespace
         EndPaint(infoWindow, &paint);
     }
 
+    void GetInfoPanelCancelRect(HWND infoWindow, RECT *cancelRect)
+    {
+        if (!cancelRect)
+        {
+            return;
+        }
+        SetRectEmpty(cancelRect);
+        RECT clientRect{};
+        if (!GetClientRect(infoWindow, &clientRect))
+        {
+            return;
+        }
+        UINT dpi = GetDpiForWindow(infoWindow);
+        if (!dpi)
+        {
+            dpi = USER_DEFAULT_SCREEN_DPI;
+        }
+        LONG buttonWidth = static_cast<LONG>(
+            ScaleForDpi(kInfoPanelCancelWidth, dpi));
+        LONG buttonHeight = static_cast<LONG>(
+            ScaleForDpi(kInfoPanelCancelHeight, dpi));
+        LONG rightPadding = static_cast<LONG>(
+            ScaleForDpi(kInfoPanelCancelRightPadding, dpi));
+        LONG bottomPadding = static_cast<LONG>(
+            ScaleForDpi(kInfoPanelCancelBottomPadding, dpi));
+        cancelRect->right =
+            std::max<LONG>(clientRect.right - rightPadding, 0L);
+        cancelRect->left =
+            std::max<LONG>(cancelRect->right - buttonWidth, 0L);
+        cancelRect->bottom =
+            std::max<LONG>(clientRect.bottom - bottomPadding, 0L);
+        cancelRect->top =
+            std::max<LONG>(cancelRect->bottom - buttonHeight, 0L);
+    }
+
+    struct ChildWindowClassLookup
+    {
+        PCWSTR className;
+        HWND window;
+    };
+
+    BOOL CALLBACK FindChildWindowByClass(HWND window, LPARAM parameter)
+    {
+        auto *lookup = reinterpret_cast<ChildWindowClassLookup *>(parameter);
+        wchar_t className[64]{};
+        if (GetClassNameW(window, className, ARRAYSIZE(className)) &&
+            lstrcmpW(className, lookup->className) == 0)
+        {
+            lookup->window = window;
+            return FALSE;
+        }
+        return TRUE;
+    }
+
+    HWND FindDescendantWindowByClass(HWND parent, PCWSTR className)
+    {
+        ChildWindowClassLookup lookup{className, nullptr};
+        EnumChildWindows(parent, FindChildWindowByClass,
+                         reinterpret_cast<LPARAM>(&lookup));
+        return lookup.window;
+    }
+
+    bool InvokeNativeCancelFromInfoPanel(HWND infoWindow)
+    {
+        OperationTileElement *tile = nullptr;
+        HWND hostWindow = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto it = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [infoWindow](CircleState const &state)
+                { return state.infoWindow == infoWindow; });
+            if (it == g_circles.end())
+            {
+                return false;
+            }
+            tile = it->tile;
+            hostWindow = it->hostWindow;
+        }
+
+        DirectUI::Element *operationTileRoot = nullptr;
+        DirectUI::Element *tileHeaderRoot = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [tile](TransferSummaryState const &state)
+                { return state.tile == tile; });
+            if (it == g_transferSummaries.end())
+            {
+                return false;
+            }
+            operationTileRoot = it->operationTileRoot;
+            tileHeaderRoot = it->tileHeaderRoot;
+        }
+
+        DirectUI::Element *cancelElement = FindSkinElement(
+            operationTileRoot, tileHeaderRoot, L"eltCancelButton", false);
+        if (!cancelElement)
+        {
+            Wh_Log(L"custom cancel native element not found tile=%p",
+                   reinterpret_cast<void *>(tile));
+            return false;
+        }
+
+        RECT bounds{};
+        HRESULT boundsResult =
+            Element_GetRootRelativeBounds_Original(cancelElement, &bounds);
+        if (FAILED(boundsResult) || bounds.right <= bounds.left ||
+            bounds.bottom <= bounds.top)
+        {
+            Wh_Log(L"custom cancel native bounds invalid tile=%p result=0x%08X",
+                   reinterpret_cast<void *>(tile),
+                   static_cast<unsigned int>(boundsResult));
+            return false;
+        }
+
+        HWND operationTileHost = FindDescendantWindowByClass(
+            hostWindow, L"OperationTileHost");
+        if (!operationTileHost || !IsWindow(operationTileHost))
+        {
+            Wh_Log(L"custom cancel OperationTileHost not found host=%p",
+                   reinterpret_cast<void *>(hostWindow));
+            return false;
+        }
+
+        int x = bounds.left + (bounds.right - bounds.left) / 2;
+        int y = bounds.top + (bounds.bottom - bounds.top) / 2;
+        LPARAM point = MAKELPARAM(x, y);
+        SendMessageW(operationTileHost, WM_MOUSEMOVE, 0, point);
+        SendMessageW(operationTileHost, WM_LBUTTONDOWN, MK_LBUTTON, point);
+        SendMessageW(operationTileHost, WM_LBUTTONUP, 0, point);
+        Wh_Log(L"custom cancel forwarded tile=%p host=%p x=%d y=%d",
+               reinterpret_cast<void *>(tile),
+               reinterpret_cast<void *>(operationTileHost), x, y);
+        return true;
+    }
+
     LRESULT CALLBACK InfoPanelWindowProc(HWND window,
                                          UINT message,
                                          WPARAM wParam,
@@ -1361,7 +1759,43 @@ namespace
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
         case WM_NCHITTEST:
-            return HTTRANSPARENT;
+        {
+            POINT point{static_cast<short>(LOWORD(lParam)),
+                        static_cast<short>(HIWORD(lParam))};
+            ScreenToClient(window, &point);
+            RECT cancelRect{};
+            GetInfoPanelCancelRect(window, &cancelRect);
+            return PtInRect(&cancelRect, point) ? HTCLIENT : HTTRANSPARENT;
+        }
+        case WM_LBUTTONUP:
+        {
+            POINT point{static_cast<short>(LOWORD(lParam)),
+                        static_cast<short>(HIWORD(lParam))};
+            RECT cancelRect{};
+            GetInfoPanelCancelRect(window, &cancelRect);
+            if (PtInRect(&cancelRect, point))
+            {
+                InvokeNativeCancelFromInfoPanel(window);
+                return 0;
+            }
+            return 0;
+        }
+        case WM_SETCURSOR:
+        {
+            POINT point{};
+            if (GetCursorPos(&point))
+            {
+                ScreenToClient(window, &point);
+                RECT cancelRect{};
+                GetInfoPanelCancelRect(window, &cancelRect);
+                if (PtInRect(&cancelRect, point))
+                {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
+            break;
+        }
         }
         return DefWindowProcW(window, message, wParam, lParam);
     }
@@ -1951,10 +2385,12 @@ namespace
         int y = ScaleForDpi(kInfoPanelTop, dpi);
         int rightPadding = ScaleForDpi(kContentRightPadding, dpi);
         int width = std::max(static_cast<int>(clientRect.right) - x - rightPadding, 1);
-        int logicalHeight =
+        int minimumLogicalHeight =
             modeKnown && expanded ? kInfoPanelExpandedHeight
                                   : kInfoPanelCommonHeight;
-        int height = ScaleForDpi(logicalHeight, dpi);
+        int minimumHeight = ScaleForDpi(minimumLogicalHeight, dpi);
+        int height = std::max(
+            static_cast<int>(clientRect.bottom) - y, minimumHeight);
 
         if (SetWindowPos(infoWindow, HWND_TOP, x, y, width, height,
                          SWP_NOACTIVATE | SWP_NOOWNERZORDER |
@@ -3653,6 +4089,13 @@ namespace
             InvalidateRect(infoWindow, nullptr, FALSE);
         }
 
+        // SetTileDisplayMode can restore the shell's bright footer text and
+        // expanded separator after our creation-time skin ran. Reapply these
+        // visual-only properties after the native transition has settled.
+        ApplyDisplayModeFooterVisuals(
+            transitionId, state.operationTileRoot, state.tileHeaderRoot,
+            state.operationTileRoot);
+
         bool nativeDetailsHidden =
             !Element_GetVisible_Original(elements.details);
         bool nativeProgressContainerHidden =
@@ -4937,7 +5380,7 @@ namespace
             }
 
             HRESULT fontWeightResult =
-                Element_SetFontWeight_Original(summary, 600);
+                Element_SetFontWeight_Original(summary, 575);
             if (FAILED(fontWeightResult))
             {
                 LogSetterFailure(eventId, L"eltSummary", L"font-weight",
@@ -4945,7 +5388,7 @@ namespace
             }
 
             HRESULT marginResult =
-                Element_SetMargin_Original(summary, 0, 6, 0, 8);
+                Element_SetMargin_Original(summary, 0, 20, 0, 1);
             if (FAILED(marginResult))
             {
                 LogSetterFailure(eventId, L"eltSummary", L"margin",
@@ -5034,7 +5477,7 @@ namespace
                                  colorResult);
             }
 
-            HRESULT sizeResult = Element_SetFontSize_Original(element, 15);
+            HRESULT sizeResult = Element_SetFontSize_Original(element, 14);
             if (FAILED(sizeResult))
             {
                 LogSetterFailure(eventId, target.name, L"font-size-header",
@@ -5253,6 +5696,12 @@ namespace
                 LogSetterFailure(eventId, target.name, L"margin-detail",
                                  marginResult);
         }
+
+        // More/Fewer details lives outside idOperationTile on this shell
+        // build. Apply the same restrained footer styling at creation and
+        // again after every native mode transition (ApplyDisplayMode).
+        ApplyDisplayModeFooterVisuals(
+            eventId, operationTileRoot, state.tileHeaderRoot, parentElement);
 
         // Style the existing native action controls as part of the same
         // visual pass. Their parentage/actions remain untouched.
@@ -5698,7 +6147,7 @@ namespace
 
 BOOL Wh_ModInit()
 {
-    Wh_Log(L"File Operation Styler 0.10.41 initialization started");
+    Wh_Log(L"File Operation Styler 0.10.50 initialization started");
 
     if (!InitializeProgressCircleUi())
     {
@@ -5712,7 +6161,7 @@ BOOL Wh_ModInit()
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 0.10.41 ready");
+    Wh_Log(L"File Operation Styler 0.10.50 ready");
     return TRUE;
 }
 
@@ -5724,5 +6173,5 @@ void Wh_ModUninit()
         g_transferSummaries.clear();
     }
     ClearSkinState();
-    Wh_Log(L"File Operation Styler 0.10.41 uninitialization complete");
+    Wh_Log(L"File Operation Styler 0.10.50 uninitialization complete");
 }
