@@ -4,6 +4,19 @@ A modern replacement for the standard Windows 11 file operation window.
 
 File Operation Styler gives copy, move, delete, and recycle operations a cleaner modern layout while keeping the normal Windows file operation behavior.
 
+
+## Screenshots
+
+![File Operation Styler](images/file-operation-styler.png)
+
+### Default vs File Operation Styler
+
+![Default vs File Operation Styler](images/file-operation-styler-compare.png)
+
+### Themes
+
+![File Operation Styler Themes](images/file-operation-styler-themes.png)
+
 ## Features
 
 - Modern copy and move progress window

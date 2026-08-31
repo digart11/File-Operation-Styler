@@ -19,8 +19,17 @@ A modern replacement for the standard Windows 11 file operation window.
 
 File Operation Styler gives copy, move, delete, and recycle operations a cleaner modern layout while keeping the normal Windows file operation behavior.
 
-![File Operation Styler](images/file-operation-styler.png)
+## Screenshots
 
+![File Operation Styler](https://raw.githubusercontent.com/digart11/File-Operation-Styler/master/images/file-operation-styler.png)
+
+### Default vs File Operation Styler
+
+![Default vs File Operation Styler](https://raw.githubusercontent.com/digart11/File-Operation-Styler/master/images/file-operation-styler-compare.png)
+
+### Themes
+
+![File Operation Styler Themes](https://raw.githubusercontent.com/digart11/File-Operation-Styler/master/images/file-operation-styler-themes.png)
 ## Features
 
 - Modern copy and move progress window
@@ -1861,6 +1870,7 @@ namespace
         std::wstring descriptionMiddle;
         std::wstring secondLocation;
         std::wstring descriptionEnd;
+        std::wstring currentItemName;
         std::vector<double> rateHistory;
     };
 
@@ -2010,6 +2020,13 @@ namespace
             readDescriptionFragment(L"eltSecondLocation");
         snapshot->descriptionEnd =
             readDescriptionFragment(L"eltEndText");
+        if (snapshot->expanded)
+        {
+            DirectUI::Element *currentItem = FindSkinElement(
+                stateCopy.operationTileRoot, stateCopy.tileHeaderRoot,
+                L"eltItemName", false);
+            snapshot->currentItemName = ReadDirectUiText(currentItem);
+        }
         return true;
     }
 
@@ -2332,6 +2349,12 @@ namespace
             width - ScaleForDpi(kContentRightPadding, dpi));
         int contentWidth = std::max(contentRight - contentLeft, 1);
         int detailsOffset = ScaleForDpi(kInfoPanelTop, dpi);
+        bool showCurrentItem =
+            snapshot.expanded &&
+            snapshot.currentItemName.find_first_not_of(L" \t\r\n") !=
+                std::wstring::npos;
+        int expandedDetailOffset =
+            showCurrentItem ? ScaleForDpi(16, dpi) : 0;
 
         if (elements.showDescription)
         {
@@ -2531,6 +2554,24 @@ namespace
                                 &primaryBrush);
         }
 
+        if (showCurrentItem)
+        {
+            Gdiplus::StringFormat currentItemFormat;
+            currentItemFormat.SetFormatFlags(
+                Gdiplus::StringFormatFlagsNoWrap);
+            currentItemFormat.SetTrimming(
+                Gdiplus::StringTrimmingEllipsisCharacter);
+            Gdiplus::RectF currentItemBounds(
+                static_cast<Gdiplus::REAL>(contentLeft),
+                static_cast<Gdiplus::REAL>(
+                    detailsOffset - ScaleForDpi(6, dpi)),
+                static_cast<Gdiplus::REAL>(contentWidth),
+                static_cast<Gdiplus::REAL>(ScaleForDpi(20, dpi)));
+            graphics.DrawString(
+                snapshot.currentItemName.c_str(), -1, selectedFont,
+                currentItemBounds, &currentItemFormat, &secondaryBrush);
+        }
+
         wchar_t rateSize[64]{};
         wchar_t rateValue[80]{};
         wchar_t timeText[64]{};
@@ -2598,7 +2639,8 @@ namespace
             Gdiplus::REAL speedX =
                 static_cast<Gdiplus::REAL>(contentLeft);
             Gdiplus::REAL speedY = static_cast<Gdiplus::REAL>(
-                detailsOffset + ScaleForDpi(kInfoPanelSpeedTop, dpi));
+                detailsOffset + expandedDetailOffset +
+                ScaleForDpi(kInfoPanelSpeedTop, dpi));
             drawInlineSegment(L"Speed: ", &secondaryBrush, speedY, &speedX);
             drawInlineSegment(rateValue, &primaryBrush, speedY, &speedX);
             drawInlineSegment(L"  \x2022  Time remaining: ", &secondaryBrush,
@@ -2644,7 +2686,8 @@ namespace
             Gdiplus::REAL itemsX =
                 static_cast<Gdiplus::REAL>(contentLeft);
             Gdiplus::REAL itemsY = static_cast<Gdiplus::REAL>(
-                detailsOffset + ScaleForDpi(kInfoPanelItemsTop, dpi));
+                detailsOffset + expandedDetailOffset +
+                ScaleForDpi(kInfoPanelItemsTop, dpi));
             drawInlineSegment(L"Items remaining: ", &secondaryBrush, itemsY,
                               &itemsX);
             drawInlineSegment(itemsValue, &primaryBrush, itemsY, &itemsX);
@@ -2654,7 +2697,8 @@ namespace
         if (elements.showProgressBar)
         {
             Gdiplus::REAL progressTop = static_cast<Gdiplus::REAL>(
-                detailsOffset + ScaleForDpi(kInfoPanelProgressTop, dpi));
+                detailsOffset + expandedDetailOffset +
+                ScaleForDpi(kInfoPanelProgressTop, dpi));
             Gdiplus::REAL progressHeight = static_cast<Gdiplus::REAL>(
                 ScaleForDpi(kInfoPanelProgressHeight, dpi));
             Gdiplus::REAL progressWidth =
