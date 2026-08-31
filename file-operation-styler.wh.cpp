@@ -2,7 +2,7 @@
 // @id              file-operation-styler
 // @name            File Operation Styler
 // @description     Portable custom presentation for native Explorer file operations with a skin-safe unified presentation.
-// @version         0.12.11
+// @version         1.0.0
 // @author          digART
 // @github          https://github.com/digart11
 // @license         GPL-3.0
@@ -44,7 +44,6 @@ File Operation Styler gives copy, move, delete, and recycle operations a cleaner
 ## Customization
 
 Choose one of the included themes or adjust a few basic options to create your own look.
-
 
 ## Notes
 
