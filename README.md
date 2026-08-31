@@ -35,5 +35,4 @@ Choose one of the included themes or adjust a few basic options to create your o
 
 ## Notes
 
-File Operation Styler changes the appearance of the normal file operation window only.  
-Windows continues to handle the actual copy, move, delete, conflicts, and errors.
+File Operation Styler changes the appearance of the normal file operation window only. Windows continues to handle the actual copy, move, delete, conflicts, and errors.
