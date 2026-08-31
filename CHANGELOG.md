@@ -1,8 +1,5 @@
 # File Operation Styler changelog
 
-
-# File Operation Styler changelog
-
 ## 1.0.0
 
 - Initial public release.
