@@ -1,5 +1,20 @@
 # File Operation Styler changelog
 
+
+# File Operation Styler changelog
+
+## 1.0.0
+
+- Initial public release.
+- Modern custom layout for Windows 11 copy, move, delete, and recycle operations.
+- Compact and expanded views with circular percentage indicator.
+- Shows transferred size, current item, remaining items, speed, and estimated time.
+- Progress graph in More Details view.
+- Supports multiple simultaneous file operations.
+- Preserves native Pause, Resume, Cancel, conflict, and error handling.
+- Includes built-in themes and customizable colors, typography, and progress styling.
+
+
 ## 0.12.0 architecture-alpha
 
 - Replaced the visible normal-operation DirectUI composition with one opaque,
