@@ -1,8 +1,8 @@
 // ==WindhawkMod==
 // @id              file-operation-styler
 // @name            File Operation Styler
-// @description     Portable custom presentation for native Explorer file operations (0.12 architecture alpha, skin-safe unified presentation).
-// @version         0.12.10
+// @description     Portable custom presentation for native Explorer file operations with a skin-safe unified presentation.
+// @version         0.12.11
 // @author          digART
 // @github          https://github.com/digart11
 // @license         GPL-3.0
@@ -18,6 +18,8 @@
 A modern replacement for the standard Windows 11 file operation window.
 
 File Operation Styler gives copy, move, delete, and recycle operations a cleaner modern layout while keeping the normal Windows file operation behavior.
+
+![File Operation Styler](images/file-operation-styler.png)
 
 ## Features
 
@@ -36,8 +38,6 @@ File Operation Styler gives copy, move, delete, and recycle operations a cleaner
 Choose one of the included themes or adjust a few basic options to create your own look.
 
 ## Screenshots
-
-![File Operation Styler](images/file-operation-styler.png)
 
 ![Themes](images/file-operation-styler-themes.png)
 
@@ -119,7 +119,7 @@ Windows continues to handle the actual copy, move, delete, conflicts, and errors
 */
 // ==/WindhawkModSettings==
 
-// 0.12 architecture alpha: Explorer remains the operation engine and native
+// 0.12 architecture: Explorer remains the operation engine and native
 // fallback, while normal-operation visuals are rendered in DPI-aware child
 // windows owned by this mod. Native DirectUI controls stay alive underneath.
 
@@ -167,8 +167,31 @@ namespace
     };
 
     thread_local SkinState g_skinState{};
+    std::atomic<bool> g_unloading{};
+    std::atomic<unsigned int> g_presentationActivations{};
     std::atomic<unsigned long long> g_skinEventSequence{};
     std::atomic<unsigned long long> g_displayTransitionSequence{};
+
+    class ScopedPresentationActivation
+    {
+    public:
+        ScopedPresentationActivation()
+        {
+            g_presentationActivations.fetch_add(
+                1, std::memory_order_acq_rel);
+        }
+
+        ~ScopedPresentationActivation()
+        {
+            g_presentationActivations.fetch_sub(
+                1, std::memory_order_acq_rel);
+        }
+
+        ScopedPresentationActivation(
+            ScopedPresentationActivation const &) = delete;
+        ScopedPresentationActivation &operator=(
+            ScopedPresentationActivation const &) = delete;
+    };
 
     void ClearSkinState()
     {
@@ -242,7 +265,8 @@ namespace
         DirectUI::Element **createdElement)
     {
         auto &state = g_skinState;
-        if (!state.active || !state.collecting)
+        if (g_unloading.load(std::memory_order_acquire) ||
+            !state.active || !state.collecting)
         {
             return DUIXmlParser_CreateElement_Original(
                 parser, resourceName, parent, insertBefore, deferCookie,
@@ -395,7 +419,6 @@ namespace
         unsigned long long completedBytes;
         unsigned long long totalBytes;
         bool bytesValid;
-        std::wstring nativeSummary;
         bool displayModeKnown;
         bool expanded;
         double nativeDisplayRate = 0.0;
@@ -1003,17 +1026,6 @@ namespace
         type.footerSize = type.bodySize;
         type.graphValueSize = std::max(type.bodySize - 1, 7);
 
-        Wh_Log(
-            L"SETTINGS customization=%s preset=%s "
-            L"circleThickness=%d progressThickness=%d "
-            L"bodySize=%d summarySize=%d percentSize=%d",
-            g_settings.customizationEnabled ? L"on" : L"off",
-            g_settings.preset.c_str(),
-            layout.circleStroke,
-            layout.progressHeight,
-            type.bodySize,
-            type.summarySize,
-            type.circlePercentSize);
     }
 
 #define kBackgroundColor (g_settings.theme.background)
@@ -1048,20 +1060,46 @@ namespace
     using DwmSetWindowAttribute_t = HRESULT(WINAPI *)(
         HWND hwnd, DWORD attribute, LPCVOID value, DWORD valueSize);
 
+    HMODULE g_ownedDwmApiModule;
+    DwmSetWindowAttribute_t g_dwmSetWindowAttribute;
+
     DwmSetWindowAttribute_t GetDwmSetWindowAttribute()
     {
-        static DwmSetWindowAttribute_t function = []() -> DwmSetWindowAttribute_t
+        static std::once_flag initializeOnce;
+        std::call_once(initializeOnce, []
         {
-            HMODULE module = LoadLibraryExW(
-                L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            HMODULE module = GetModuleHandleW(L"dwmapi.dll");
+            bool owned = false;
             if (!module)
             {
-                return nullptr;
+                module = LoadLibraryExW(
+                    L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+                owned = module != nullptr;
             }
-            return reinterpret_cast<DwmSetWindowAttribute_t>(
+            if (!module)
+            {
+                return;
+            }
+
+            g_dwmSetWindowAttribute =
+                reinterpret_cast<DwmSetWindowAttribute_t>(
                 GetProcAddress(module, "DwmSetWindowAttribute"));
-        }();
-        return function;
+            if (owned)
+            {
+                g_ownedDwmApiModule = module;
+            }
+        });
+        return g_dwmSetWindowAttribute;
+    }
+
+    void ShutdownDwmApi()
+    {
+        g_dwmSetWindowAttribute = nullptr;
+        if (g_ownedDwmApiModule)
+        {
+            FreeLibrary(g_ownedDwmApiModule);
+            g_ownedDwmApiModule = nullptr;
+        }
     }
 
     void ApplyUnifiedHostChrome(HWND hostWindow)
@@ -1115,11 +1153,11 @@ namespace
 #define kDisplayModeFooterReserveHeight (ActiveLayout().footerReserveHeight)
 
     constexpr wchar_t kCircleWindowClass[] =
-        L"Windhawk.FileOperationStyler.ProgressCircle.0.12.10";
+        L"Windhawk.FileOperationStyler.ProgressCircle.0.12.11";
     constexpr wchar_t kInfoPanelWindowClass[] =
-        L"Windhawk.FileOperationStyler.OperationPresentation.0.12.10";
+        L"Windhawk.FileOperationStyler.OperationPresentation.0.12.11";
     constexpr wchar_t kFooterOverlayWindowClass[] =
-        L"Windhawk.FileOperationStyler.FooterPresentation.0.12.10";
+        L"Windhawk.FileOperationStyler.FooterPresentation.0.12.11";
 
 #define kInfoPanelTop (ActiveLayout().infoTop)
 #define kInfoPanelCommonHeight (ActiveLayout().compactPanelHeight)
@@ -1191,8 +1229,20 @@ namespace
         bool specialOperationState;
     };
 
+    struct HostNativeGeometry
+    {
+        HWND hostWindow;
+        int width;
+        int height;
+        bool restorationAttempted;
+    };
+
     std::mutex g_hostPresentationMutex;
     std::vector<HostPresentationState> g_hostPresentationStates;
+    std::mutex g_hostNativeGeometryMutex;
+    std::vector<HostNativeGeometry> g_hostNativeGeometries;
+    thread_local HWND g_suppressNativeGeometryCaptureHost;
+    thread_local HWND g_restoringNativeGeometryHost;
     std::vector<HostPositionRequest> g_hostPositionRequests;
     std::mutex g_displayDiagnosticMutex;
     std::vector<DeferredDisplaySnapshot> g_deferredDisplaySnapshots;
@@ -1204,6 +1254,126 @@ namespace
     UINT g_removeHostSubclassMessage;
     UINT g_positionCirclesMessage;
     UINT g_logDisplayStateMessage;
+
+    class ScopedHostGeometryChange
+    {
+    public:
+        ScopedHostGeometryChange(HWND hostWindow,
+                                 bool restoringNativeGeometry)
+            : m_previousCaptureSuppression(
+                  g_suppressNativeGeometryCaptureHost),
+              m_previousRestoration(g_restoringNativeGeometryHost)
+        {
+            g_suppressNativeGeometryCaptureHost = hostWindow;
+            if (restoringNativeGeometry)
+            {
+                g_restoringNativeGeometryHost = hostWindow;
+            }
+        }
+
+        ~ScopedHostGeometryChange()
+        {
+            g_suppressNativeGeometryCaptureHost =
+                m_previousCaptureSuppression;
+            g_restoringNativeGeometryHost = m_previousRestoration;
+        }
+
+        ScopedHostGeometryChange(ScopedHostGeometryChange const &) = delete;
+        ScopedHostGeometryChange &operator=(
+            ScopedHostGeometryChange const &) = delete;
+
+    private:
+        HWND m_previousCaptureSuppression;
+        HWND m_previousRestoration;
+    };
+
+    void CaptureHostNativeGeometry(HWND hostWindow, WINDOWPOS const &position)
+    {
+        if (g_unloading.load(std::memory_order_acquire) || !hostWindow ||
+            (position.flags & SWP_NOSIZE) ||
+            position.cx <= 0 || position.cy <= 0 ||
+            g_suppressNativeGeometryCaptureHost == hostWindow)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_hostNativeGeometryMutex);
+        auto it = std::find_if(
+            g_hostNativeGeometries.begin(), g_hostNativeGeometries.end(),
+            [hostWindow](HostNativeGeometry const &geometry)
+            { return geometry.hostWindow == hostWindow; });
+        if (it == g_hostNativeGeometries.end())
+        {
+            g_hostNativeGeometries.push_back(
+                {hostWindow, position.cx, position.cy, false});
+        }
+        else
+        {
+            it->width = position.cx;
+            it->height = position.cy;
+        }
+    }
+
+    void ForgetHostNativeGeometry(HWND hostWindow)
+    {
+        std::lock_guard<std::mutex> lock(g_hostNativeGeometryMutex);
+        g_hostNativeGeometries.erase(
+            std::remove_if(
+                g_hostNativeGeometries.begin(),
+                g_hostNativeGeometries.end(),
+                [hostWindow](HostNativeGeometry const &geometry)
+                { return geometry.hostWindow == hostWindow; }),
+            g_hostNativeGeometries.end());
+    }
+
+    void RestoreHostNativeGeometry(HWND hostWindow)
+    {
+        HostNativeGeometry geometry{};
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(g_hostNativeGeometryMutex);
+            auto it = std::find_if(
+                g_hostNativeGeometries.begin(),
+                g_hostNativeGeometries.end(),
+                [hostWindow](HostNativeGeometry const &candidate)
+                { return candidate.hostWindow == hostWindow; });
+            if (it == g_hostNativeGeometries.end())
+            {
+                g_hostNativeGeometries.push_back(
+                    {hostWindow, 0, 0, true});
+            }
+            else
+            {
+                if (it->restorationAttempted)
+                {
+                    return;
+                }
+                it->restorationAttempted = true;
+                geometry = *it;
+                found = geometry.width > 0 && geometry.height > 0;
+            }
+        }
+
+        if (!found)
+        {
+            Wh_Log(L"Presentation teardown has no captured native geometry "
+                   L"host=%p",
+                   reinterpret_cast<void *>(hostWindow));
+            return;
+        }
+
+        ScopedHostGeometryChange geometryChange(hostWindow, true);
+        if (!SetWindowPos(
+                hostWindow, nullptr, 0, 0, geometry.width, geometry.height,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                    SWP_NOOWNERZORDER))
+        {
+            Wh_Log(L"Presentation teardown failed to restore native geometry "
+                   L"host=%p width=%d height=%d error=%lu",
+                   reinterpret_cast<void *>(hostWindow), geometry.width,
+                   geometry.height, GetLastError());
+        }
+    }
 
     DirectUI::Element *FindSkinElement(DirectUI::Element *tileRoot,
                                        DirectUI::Element *tileHeaderRoot,
@@ -2997,11 +3167,6 @@ namespace
         }
 
         long result = buttonDefaultAction(actionElement);
-        Wh_Log(L"custom action=%s DefaultAction tile=%p element=%p "
-               L"result=0x%08X",
-               actionName, reinterpret_cast<void *>(tile),
-               reinterpret_cast<void *>(actionElement),
-               static_cast<unsigned int>(result));
         return result >= 0;
     }
 
@@ -3088,6 +3253,15 @@ namespace
                                          WPARAM wParam,
                                          LPARAM lParam)
     {
+        if (message == g_removeHostSubclassMessage)
+        {
+            return DestroyWindow(window) ? TRUE : FALSE;
+        }
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return DefWindowProcW(window, message, wParam, lParam);
+        }
+
         switch (message)
         {
         case WM_PAINT:
@@ -3386,11 +3560,6 @@ namespace
         }
 
         long result = buttonDefaultAction(displayModeButton);
-        Wh_Log(L"custom action=more-fewer DefaultAction tile=%p "
-               L"element=%p result=0x%08X",
-               reinterpret_cast<void *>(tile),
-               reinterpret_cast<void *>(displayModeButton),
-               static_cast<unsigned int>(result));
         return result >= 0;
     }
 
@@ -3399,6 +3568,15 @@ namespace
                                               WPARAM wParam,
                                               LPARAM lParam)
     {
+        if (message == g_removeHostSubclassMessage)
+        {
+            return DestroyWindow(window) ? TRUE : FALSE;
+        }
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return DefWindowProcW(window, message, wParam, lParam);
+        }
+
         switch (message)
         {
         case WM_NCCREATE:
@@ -3565,44 +3743,23 @@ namespace
         InvalidateRect(footerWindow, nullptr, FALSE);
     }
 
-    void ForgetCircleWindow(HWND circleWindow)
-    {
-        HWND progressWindow = nullptr;
-        HWND infoWindow = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(g_circleMutex);
-            auto it = std::find_if(
-                g_circles.begin(), g_circles.end(),
-                [circleWindow](CircleState const &state)
-                {
-                    return state.circleWindow == circleWindow;
-                });
-            if (it == g_circles.end())
-            {
-                return;
-            }
-            progressWindow = it->progressWindow;
-            infoWindow = it->infoWindow;
-            g_circles.erase(it);
-        }
-
-        if (progressWindow && IsWindow(progressWindow))
-        {
-            RemoveWindowSubclass(progressWindow,
-                                 NativeProgressWindowSubclassProc,
-                                 kProgressWindowSubclassId);
-        }
-        if (infoWindow && IsWindow(infoWindow))
-        {
-            DestroyWindow(infoWindow);
-        }
-    }
+    void ForgetCircleWindow(HWND circleWindow);
 
     LRESULT CALLBACK ProgressCircleWindowProc(HWND window,
                                               UINT message,
                                               WPARAM wParam,
                                               LPARAM lParam)
     {
+        if (message == g_removeHostSubclassMessage)
+        {
+            return DestroyWindow(window) ? TRUE : FALSE;
+        }
+        if (g_unloading.load(std::memory_order_acquire) &&
+            message != WM_NCDESTROY)
+        {
+            return DefWindowProcW(window, message, wParam, lParam);
+        }
+
         switch (message)
         {
         case WM_PAINT:
@@ -3624,23 +3781,61 @@ namespace
 
     void RemoveHostSubclassRecord(HWND hostWindow)
     {
-        std::lock_guard<std::mutex> lock(g_circleMutex);
-        auto it = std::find(g_subclassedHosts.begin(),
-                            g_subclassedHosts.end(), hostWindow);
-        if (it != g_subclassedHosts.end())
         {
-            g_subclassedHosts.erase(it);
-        }
-        auto requestIt = std::find_if(
-            g_hostPositionRequests.begin(), g_hostPositionRequests.end(),
-            [hostWindow](HostPositionRequest const &request)
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto it = std::find(g_subclassedHosts.begin(),
+                                g_subclassedHosts.end(), hostWindow);
+            if (it != g_subclassedHosts.end())
             {
-                return request.hostWindow == hostWindow;
-            });
-        if (requestIt != g_hostPositionRequests.end())
-        {
-            g_hostPositionRequests.erase(requestIt);
+                g_subclassedHosts.erase(it);
+            }
+            auto requestIt = std::find_if(
+                g_hostPositionRequests.begin(), g_hostPositionRequests.end(),
+                [hostWindow](HostPositionRequest const &request)
+                {
+                    return request.hostWindow == hostWindow;
+                });
+            if (requestIt != g_hostPositionRequests.end())
+            {
+                g_hostPositionRequests.erase(requestIt);
+            }
         }
+        ForgetHostNativeGeometry(hostWindow);
+    }
+
+    bool RemoveDestroyedHostRecords(HWND hostWindow)
+    {
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        for (CircleState const &state : g_circles)
+        {
+            if (state.hostWindow == hostWindow &&
+                ((state.circleWindow && IsWindow(state.circleWindow)) ||
+                 (state.infoWindow && IsWindow(state.infoWindow)) ||
+                 (state.progressWindow && IsWindow(state.progressWindow))))
+            {
+                return false;
+            }
+        }
+
+        g_circles.erase(
+            std::remove_if(
+                g_circles.begin(), g_circles.end(),
+                [hostWindow](CircleState const &state)
+                { return state.hostWindow == hostWindow; }),
+            g_circles.end());
+        g_subclassedHosts.erase(
+            std::remove(g_subclassedHosts.begin(),
+                        g_subclassedHosts.end(), hostWindow),
+            g_subclassedHosts.end());
+        g_hostPositionRequests.erase(
+            std::remove_if(
+                g_hostPositionRequests.begin(),
+                g_hostPositionRequests.end(),
+                [hostWindow](HostPositionRequest const &request)
+                { return request.hostWindow == hostWindow; }),
+            g_hostPositionRequests.end());
+        ForgetHostNativeGeometry(hostWindow);
+        return true;
     }
 
     PCWSTR TakeProgressCirclePositionReason(HWND hostWindow)
@@ -3661,49 +3856,256 @@ namespace
         return reason;
     }
 
-    void DestroyProgressCirclesForHost(HWND hostWindow)
+    bool RemoveProgressWindowSubclassForTeardown(HWND progressWindow)
     {
-        std::vector<CircleState> removed;
+        if (!progressWindow || !IsWindow(progressWindow))
+        {
+            return true;
+        }
+
+        if (GetWindowThreadProcessId(progressWindow, nullptr) !=
+            GetCurrentThreadId())
+        {
+            DWORD_PTR result = FALSE;
+            if (SendMessageTimeoutW(
+                    progressWindow, g_removeHostSubclassMessage, 0, 0,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &result) &&
+                result == TRUE)
+            {
+                return true;
+            }
+
+            Wh_Log(L"Presentation teardown owning-thread progress subclass "
+                   L"removal was not acknowledged hwnd=%p",
+                   reinterpret_cast<void *>(progressWindow));
+            return false;
+        }
+
+        DWORD_PTR referenceData = 0;
+        if (!GetWindowSubclass(progressWindow,
+                               NativeProgressWindowSubclassProc,
+                               kProgressWindowSubclassId, &referenceData))
+        {
+            return true;
+        }
+
+        if (!RemoveWindowSubclass(progressWindow,
+                                  NativeProgressWindowSubclassProc,
+                                  kProgressWindowSubclassId) &&
+            GetWindowSubclass(progressWindow,
+                              NativeProgressWindowSubclassProc,
+                              kProgressWindowSubclassId, &referenceData))
+        {
+            Wh_Log(L"Presentation teardown failed to remove progress "
+                   L"subclass hwnd=%p error=%lu",
+                   reinterpret_cast<void *>(progressWindow),
+                   GetLastError());
+            return false;
+        }
+
+        return true;
+    }
+
+    bool DestroyWindowOnOwningThread(HWND window, PCWSTR role)
+    {
+        if (!window || !IsWindow(window))
+        {
+            return true;
+        }
+
+        if (GetWindowThreadProcessId(window, nullptr) !=
+            GetCurrentThreadId())
+        {
+            DWORD_PTR result = FALSE;
+            if (SendMessageTimeoutW(
+                    window, g_removeHostSubclassMessage, 0, 0,
+                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &result) &&
+                result == TRUE &&
+                !IsWindow(window))
+            {
+                return true;
+            }
+
+            Wh_Log(L"Presentation teardown owning-thread destruction was "
+                   L"not acknowledged role=%s hwnd=%p",
+                   role, reinterpret_cast<void *>(window));
+            return false;
+        }
+
+        if (!DestroyWindow(window) && IsWindow(window))
+        {
+            Wh_Log(L"Presentation teardown DestroyWindow failed role=%s "
+                   L"hwnd=%p error=%lu",
+                   role, reinterpret_cast<void *>(window), GetLastError());
+            return false;
+        }
+
+        return true;
+    }
+
+    bool CleanupCircleStateResources(CircleState *state,
+                                     bool destroyCircleAnchor)
+    {
+        if (!state)
+        {
+            return true;
+        }
+
+        if (!RemoveProgressWindowSubclassForTeardown(
+                state->progressWindow))
+        {
+            return false;
+        }
+        state->progressWindow = nullptr;
+
+        if (!DestroyWindowOnOwningThread(state->infoWindow,
+                                         L"information-panel"))
+        {
+            return false;
+        }
+        state->infoWindow = nullptr;
+
+        if (destroyCircleAnchor &&
+            !DestroyWindowOnOwningThread(state->circleWindow,
+                                         L"circle-anchor"))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    void EraseCircleStateRecord(CircleState const &state)
+    {
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        g_circles.erase(
+            std::remove_if(
+                g_circles.begin(), g_circles.end(),
+                [&state](CircleState const &candidate)
+                {
+                    return candidate.circleWindow == state.circleWindow;
+                }),
+            g_circles.end());
+    }
+
+    void RetainCleanupOnlyCircleState(CircleState state,
+                                      PCWSTR reason)
+    {
+        state.tile = nullptr;
+        state.positionValid = false;
+        bool shouldLog = false;
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
-            auto it = g_circles.begin();
-            while (it != g_circles.end())
+            auto it = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [&state](CircleState const &candidate)
+                {
+                    return candidate.circleWindow == state.circleWindow;
+                });
+            if (it == g_circles.end())
             {
-                if (it->hostWindow == hostWindow)
+                g_circles.push_back(state);
+                shouldLog = true;
+            }
+            else
+            {
+                shouldLog = it->tile != nullptr;
+                *it = state;
+            }
+        }
+
+        if (shouldLog)
+        {
+            Wh_Log(L"Presentation cleanup retained for teardown reason=%s "
+                   L"host=%p circle=%p info=%p progress=%p",
+                   reason, reinterpret_cast<void *>(state.hostWindow),
+                   reinterpret_cast<void *>(state.circleWindow),
+                   reinterpret_cast<void *>(state.infoWindow),
+                   reinterpret_cast<void *>(state.progressWindow));
+        }
+    }
+
+    void ForgetCircleWindow(HWND circleWindow)
+    {
+        CircleState state{};
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto it = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [circleWindow](CircleState const &candidate)
                 {
-                    removed.push_back(*it);
-                    it = g_circles.erase(it);
-                }
-                else
+                    return candidate.circleWindow == circleWindow;
+                });
+            if (it == g_circles.end())
+            {
+                return;
+            }
+            state = *it;
+        }
+
+        if (!CleanupCircleStateResources(&state, false))
+        {
+            RetainCleanupOnlyCircleState(
+                state, L"circle-anchor-destruction");
+            return;
+        }
+
+        EraseCircleStateRecord(state);
+    }
+
+    bool DestroyProgressCirclesForHost(HWND hostWindow)
+    {
+        std::vector<CircleState> states;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            for (CircleState const &state : g_circles)
+            {
+                if (state.hostWindow == hostWindow)
                 {
-                    ++it;
+                    states.push_back(state);
                 }
             }
         }
 
-        for (auto const &state : removed)
+        // Every call is made by the owning host UI thread. Remove callbacks
+        // into this module before destroying their custom lifetime anchors.
+        for (CircleState const &state : states)
         {
-            if (state.progressWindow && IsWindow(state.progressWindow))
+            if (!RemoveProgressWindowSubclassForTeardown(
+                    state.progressWindow))
             {
-                RemoveWindowSubclass(state.progressWindow,
-                                     NativeProgressWindowSubclassProc,
-                                     kProgressWindowSubclassId);
+                return false;
             }
-            if (state.infoWindow && IsWindow(state.infoWindow))
+        }
+
+        for (CircleState const &state : states)
+        {
+            if (!DestroyWindowOnOwningThread(state.infoWindow,
+                                             L"information-panel"))
             {
-                DestroyWindow(state.infoWindow);
+                return false;
             }
             if (state.circleWindow && IsWindow(state.circleWindow))
             {
-                DestroyWindow(state.circleWindow);
+                if (!DestroyWindowOnOwningThread(state.circleWindow,
+                                                 L"circle-anchor"))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                ForgetCircleWindow(state.circleWindow);
             }
         }
 
         HWND footerWindow = GetFooterOverlayWindow(hostWindow);
-        if (footerWindow && IsWindow(footerWindow))
+        if (!DestroyWindowOnOwningThread(footerWindow, L"footer-overlay"))
         {
-            DestroyWindow(footerWindow);
+            return false;
         }
+
+        return true;
     }
 
     void CancelDeferredDisplaySnapshotsForHost(HWND hostWindow)
@@ -3997,9 +4399,6 @@ namespace
 
             unsigned long long transitionId =
                 ++g_displayTransitionSequence;
-            Wh_Log(L"MODE[%llu] SPECIAL_STATE host=%p result=resume-normal",
-                   transitionId,
-                   reinterpret_cast<void *>(hostWindow));
             ScheduleDeferredDisplaySnapshot(
                 state.owner, transitionId, state.expanded);
         }
@@ -4182,6 +4581,19 @@ namespace
         UINT_PTR subclassId,
         DWORD_PTR)
     {
+        if (message == WM_WINDOWPOSCHANGING && lParam)
+        {
+            CaptureHostNativeGeometry(
+                window, *reinterpret_cast<WINDOWPOS *>(lParam));
+        }
+
+        if (g_unloading.load(std::memory_order_acquire) &&
+            message != g_removeHostSubclassMessage &&
+            message != WM_NCDESTROY)
+        {
+            return DefSubclassProc(window, message, wParam, lParam);
+        }
+
         if (message == WM_SETTEXT)
         {
             PCWSTR caption = reinterpret_cast<PCWSTR>(lParam);
@@ -4194,9 +4606,6 @@ namespace
             if (enteredSpecial)
             {
                 HideCustomPresentationForHost(window);
-                Wh_Log(L"SPECIAL_STATE host=%p caption=%s result=native-only",
-                       reinterpret_cast<void *>(window),
-                       caption ? caption : L"");
             }
             else if (leftSpecial)
             {
@@ -4252,12 +4661,35 @@ namespace
         if (message == g_removeHostSubclassMessage)
         {
             RestoreNativePresentationForHost(window);
+            if (ShouldApplyNativeColorOverrides())
+            {
+                ResetUnifiedHostChrome(window);
+            }
+            RestoreHostNativeGeometry(window);
+
+            if (!DestroyProgressCirclesForHost(window))
+            {
+                return FALSE;
+            }
+
             CancelDeferredDisplaySnapshotsForHost(window);
             ForgetHostPresentationState(window);
+
+            DWORD_PTR referenceData = 0;
+            if (!RemoveWindowSubclass(
+                    window, OperationStatusWindowSubclassProc, subclassId) &&
+                GetWindowSubclass(
+                    window, OperationStatusWindowSubclassProc, subclassId,
+                    &referenceData))
+            {
+                Wh_Log(L"Presentation teardown failed to remove host "
+                       L"subclass hwnd=%p error=%lu",
+                       reinterpret_cast<void *>(window), GetLastError());
+                return FALSE;
+            }
+
             RemoveHostSubclassRecord(window);
-            RemoveWindowSubclass(window, OperationStatusWindowSubclassProc,
-                                 subclassId);
-            return 0;
+            return TRUE;
         }
 
         if (message == g_positionCirclesMessage)
@@ -4282,17 +4714,21 @@ namespace
         {
             CancelDeferredDisplaySnapshotsForHost(window);
             ForgetHostPresentationState(window);
-            DestroyProgressCirclesForHost(window);
+            ForgetHostNativeGeometry(window);
+            if (!DestroyProgressCirclesForHost(window))
+            {
+                Wh_Log(L"Presentation cleanup incomplete during host "
+                       L"destruction hwnd=%p",
+                       reinterpret_cast<void *>(window));
+            }
             RemoveHostSubclassRecord(window);
-            RemoveWindowSubclass(window, OperationStatusWindowSubclassProc,
-                                 subclassId);
-        }
-
-        int requestedCy = 0;
-        if (message == WM_WINDOWPOSCHANGING && lParam)
-        {
-            requestedCy =
-                reinterpret_cast<WINDOWPOS *>(lParam)->cy;
+            if (!RemoveWindowSubclass(
+                    window, OperationStatusWindowSubclassProc, subclassId))
+            {
+                Wh_Log(L"Presentation cleanup failed to remove destroying "
+                       L"host subclass hwnd=%p error=%lu",
+                       reinterpret_cast<void *>(window), GetLastError());
+            }
         }
 
         LRESULT result = DefSubclassProc(window, message, wParam, lParam);
@@ -4303,7 +4739,8 @@ namespace
             int customCy = 0;
             static thread_local bool applyingHeightOverride;
             if (!(windowPosition->flags & SWP_NOSIZE) &&
-                !applyingHeightOverride)
+                !applyingHeightOverride &&
+                g_restoringNativeGeometryHost != window)
             {
                 applyingHeightOverride = true;
                 bool verified = GetVerifiedCustomHostWindowHeight(
@@ -4327,11 +4764,6 @@ namespace
                             nonClientWidth;
                     }
 
-                    Wh_Log(L"CUSTOM_SIZE host=%p requestedCy=%d "
-                           L"nativeCy=%d finalCx=%d finalCy=%d "
-                           L"result=overridden",
-                           reinterpret_cast<void *>(window), requestedCy,
-                           nativeCy, windowPosition->cx, windowPosition->cy);
                 }
             }
         }
@@ -4399,6 +4831,19 @@ namespace
         UINT_PTR subclassId,
         DWORD_PTR)
     {
+        if (message == g_removeHostSubclassMessage)
+        {
+            if (!RemoveWindowSubclass(
+                    window, NativeProgressWindowSubclassProc, subclassId))
+            {
+                Wh_Log(L"Presentation teardown failed to remove owning-thread "
+                       L"progress subclass hwnd=%p error=%lu",
+                       reinterpret_cast<void *>(window), GetLastError());
+                return FALSE;
+            }
+            return TRUE;
+        }
+
         LRESULT result = DefSubclassProc(window, message, wParam, lParam);
         if (message == WM_NCDESTROY)
         {
@@ -4622,7 +5067,6 @@ namespace
     void PositionProgressCircle(OperationTileElement *tile, PCWSTR reason)
     {
         HWND circleWindow = nullptr;
-        HWND hostWindow = nullptr;
 
         HWND registeredHost = GetRegisteredCircleHost(tile);
         if (registeredHost &&
@@ -4636,8 +5080,6 @@ namespace
         int width = 0;
         int height = 0;
         bool placementAvailable = false;
-        bool positionChanged = false;
-        bool initialPlacement = false;
 
         // A compact/expanded transition can swap the progress HWND without
         // changing the tile. Re-resolve it here, including while paused when
@@ -4653,6 +5095,39 @@ namespace
         // opaque normal-operation surface. When a special state is detected,
         // hiding our surface reveals Explorer's complete native presentation
         // without reconstructing native visibility.
+
+        HWND previousProgressWindow = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto bindingIt = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [tile](CircleState const &state)
+                { return state.tile == tile; });
+            if (bindingIt != g_circles.end() && latestProgressWindow &&
+                bindingIt->progressWindow != latestProgressWindow)
+            {
+                previousProgressWindow = bindingIt->progressWindow;
+            }
+        }
+
+        if (previousProgressWindow && IsWindow(previousProgressWindow))
+        {
+            DWORD_PTR referenceData = 0;
+            if (GetWindowSubclass(previousProgressWindow,
+                                  NativeProgressWindowSubclassProc,
+                                  kProgressWindowSubclassId,
+                                  &referenceData) &&
+                !RemoveWindowSubclass(previousProgressWindow,
+                                      NativeProgressWindowSubclassProc,
+                                      kProgressWindowSubclassId))
+            {
+                Wh_Log(L"Progress HWND rebind failed to remove old subclass "
+                       L"hwnd=%p error=%lu",
+                       reinterpret_cast<void *>(previousProgressWindow),
+                       GetLastError());
+                return;
+            }
+        }
 
         HWND progressWindowToSubclass = nullptr;
         {
@@ -4670,11 +5145,15 @@ namespace
             }
         }
 
-        if (progressWindowToSubclass)
+        if (progressWindowToSubclass &&
+            !SetWindowSubclass(progressWindowToSubclass,
+                               NativeProgressWindowSubclassProc,
+                               kProgressWindowSubclassId, 0))
         {
-            SetWindowSubclass(progressWindowToSubclass,
-                              NativeProgressWindowSubclassProc,
-                              kProgressWindowSubclassId, 0);
+            Wh_Log(L"Progress HWND rebind failed to install new subclass "
+                   L"hwnd=%p error=%lu",
+                   reinterpret_cast<void *>(progressWindowToSubclass),
+                   GetLastError());
         }
 
         CircleState placementState{};
@@ -4690,16 +5169,10 @@ namespace
             }
             placementState = *it;
             circleWindow = it->circleWindow;
-            hostWindow = it->hostWindow;
-            initialPlacement = !it->positionValid;
         }
 
         placementAvailable =
             GetCirclePlacement(placementState, &x, &y, &width, &height);
-        positionChanged = initialPlacement || placementState.positionX != x ||
-                          placementState.positionY != y ||
-                          placementState.positionWidth != width ||
-                          placementState.positionHeight != height;
 
         if (!placementAvailable || !circleWindow || !IsWindow(circleWindow))
         {
@@ -4731,12 +5204,6 @@ namespace
             }
         }
 
-        Wh_Log(L"presentation position tile=%p circle=embedded x=%d y=%d "
-               L"width=%d height=%d reason=%s geometryChanged=%s",
-               reinterpret_cast<void *>(tile), x, y, width, height,
-               initialPlacement ? L"initial" : reason,
-               positionChanged ? L"yes" : L"no");
-
         PositionInfoPanel(tile);
         PositionFooterOverlay(tile);
     }
@@ -4762,7 +5229,8 @@ namespace
 
     void ScheduleProgressCirclePosition(HWND hostWindow, PCWSTR reason)
     {
-        if (!hostWindow || !g_positionCirclesMessage)
+        if (g_unloading.load(std::memory_order_acquire) ||
+            !hostWindow || !g_positionCirclesMessage)
         {
             return;
         }
@@ -4795,7 +5263,10 @@ namespace
 
     bool EnsureHostSubclass(HWND hostWindow, unsigned long long eventId)
     {
-        ApplyUnifiedHostChrome(hostWindow);
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return false;
+        }
 
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -4806,18 +5277,65 @@ namespace
             }
         }
 
+        ApplyUnifiedHostChrome(hostWindow);
+
         if (!SetWindowSubclass(hostWindow, OperationStatusWindowSubclassProc,
                                kHostWindowSubclassId, 0))
         {
             Wh_Log(L"eventId=%llu circle SetWindowSubclass host failed "
                    L"error=%lu",
                    eventId, GetLastError());
+            if (ShouldApplyNativeColorOverrides())
+            {
+                ResetUnifiedHostChrome(hostWindow);
+            }
             return false;
         }
 
+        bool shuttingDown = false;
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
-            g_subclassedHosts.push_back(hostWindow);
+            shuttingDown = g_unloading.load(std::memory_order_acquire);
+            if (!shuttingDown)
+            {
+                g_subclassedHosts.push_back(hostWindow);
+            }
+        }
+
+        if (shuttingDown)
+        {
+            DWORD_PTR referenceData = 0;
+            bool subclassRemains =
+                !RemoveWindowSubclass(
+                    hostWindow, OperationStatusWindowSubclassProc,
+                    kHostWindowSubclassId) &&
+                GetWindowSubclass(
+                    hostWindow, OperationStatusWindowSubclassProc,
+                    kHostWindowSubclassId, &referenceData);
+            if (subclassRemains)
+            {
+                std::lock_guard<std::mutex> lock(g_circleMutex);
+                if (std::find(g_subclassedHosts.begin(),
+                              g_subclassedHosts.end(), hostWindow) ==
+                    g_subclassedHosts.end())
+                {
+                    // This is teardown tracking, not presentation activation.
+                    // Wh_ModBeforeUninit will synchronously retry removal.
+                    g_subclassedHosts.push_back(hostWindow);
+                }
+                Wh_Log(L"Presentation activation rollback failed to remove "
+                       L"host subclass hwnd=%p error=%lu",
+                       reinterpret_cast<void *>(hostWindow), GetLastError());
+            }
+            else
+            {
+                ForgetHostNativeGeometry(hostWindow);
+            }
+            if (ShouldApplyNativeColorOverrides())
+            {
+                ResetUnifiedHostChrome(hostWindow);
+            }
+            return false;
         }
 
         wchar_t currentCaption[160]{};
@@ -5016,15 +5534,8 @@ namespace
             return;
         }
 
-        bool changed = !it->deleteLikeKnown || it->deleteLike != deleteLike;
         it->deleteLikeKnown = true;
         it->deleteLike = deleteLike;
-        if (changed)
-        {
-            Wh_Log(L"OPERATION_KIND owner=%p deleteLike=%s",
-                   reinterpret_cast<void *>(owner),
-                   deleteLike ? L"yes" : L"no");
-        }
     }
 
     bool GetUniqueRegisteredCircleHost(OperationTileElement *tile,
@@ -5075,6 +5586,8 @@ namespace
                                  COperationStatusTile **canonicalOwner,
                                  bool logResult = true)
     {
+        (void)transitionId;
+        (void)logResult;
         std::vector<TransferSummaryState> states;
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
@@ -5100,13 +5613,6 @@ namespace
         if (resolveCandidate(requestedOwner))
         {
             *canonicalOwner = requestedOwner;
-            if (logResult)
-            {
-                Wh_Log(L"MODE[%llu] OWNER_RESOLVE requested=%p canonical=%p "
-                       L"adjustment=0x0 result=matched",
-                       transitionId, reinterpret_cast<void *>(requestedOwner),
-                       reinterpret_cast<void *>(requestedOwner));
-            }
             return true;
         }
 
@@ -5119,31 +5625,11 @@ namespace
             if (resolveCandidate(adjustedCandidate))
             {
                 *canonicalOwner = adjustedCandidate;
-                if (logResult)
-                {
-                    Wh_Log(
-                        L"MODE[%llu] OWNER_RESOLVE requested=%p canonical=%p "
-                        L"adjustment=0x%llX result=matched",
-                        transitionId,
-                        reinterpret_cast<void *>(requestedOwner),
-                        reinterpret_cast<void *>(adjustedCandidate),
-                        static_cast<unsigned long long>(
-                            kSetTileDisplayModeThisAdjustment));
-                }
                 return true;
             }
         }
 
         *canonicalOwner = nullptr;
-        if (logResult)
-        {
-            Wh_Log(L"MODE[%llu] OWNER_RESOLVE requested=%p canonical=%p "
-                   L"adjustment=0x%llX result=failed",
-                   transitionId, reinterpret_cast<void *>(requestedOwner),
-                   nullptr,
-                   static_cast<unsigned long long>(
-                       kSetTileDisplayModeThisAdjustment));
-        }
         return false;
     }
 
@@ -5152,7 +5638,8 @@ namespace
                                          unsigned long long transitionId,
                                          bool requestedExpanded)
     {
-        if (!g_logDisplayStateMessage)
+        if (g_unloading.load(std::memory_order_acquire) ||
+            !g_logDisplayStateMessage)
         {
             return;
         }
@@ -5161,9 +5648,6 @@ namespace
         if (!CopyRegisteredTransferState(owner, &state) || !state.tile ||
             !state.operationTileRoot)
         {
-            Wh_Log(L"MODE[%llu] DEFERRED schedule-skipped "
-                   L"reason=tile-not-registered",
-                   transitionId);
             return;
         }
 
@@ -5234,9 +5718,6 @@ namespace
 
         if (!found)
         {
-            Wh_Log(L"MODE[%llu] DEFERRED snapshot-skipped "
-                   L"reason=request-not-found host=%p",
-                   transitionId, reinterpret_cast<void *>(hostWindow));
             return;
         }
 
@@ -5256,9 +5737,6 @@ namespace
                 snapshot.uiThreadId;
         if (!currentRegistration)
         {
-            Wh_Log(L"MODE[%llu] DEFERRED layout-skipped "
-                   L"reason=stale-registration host=%p",
-                   transitionId, reinterpret_cast<void *>(hostWindow));
             return;
         }
 
@@ -5272,6 +5750,10 @@ namespace
     {
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            if (g_unloading.load(std::memory_order_acquire))
+            {
+                return;
+            }
             auto it = std::find_if(
                 g_transferSummaries.begin(), g_transferSummaries.end(),
                 [owner](TransferSummaryState const &state)
@@ -5279,7 +5761,8 @@ namespace
             if (it == g_transferSummaries.end())
             {
                 g_transferSummaries.push_back(
-                    {owner, tile, operationTileRoot, tileHeaderRoot, 0, 0, false, {}, false, false});
+                    {owner, tile, operationTileRoot, tileHeaderRoot,
+                     0, 0, false, false, false});
             }
             else
             {
@@ -5294,14 +5777,6 @@ namespace
         {
             MarkHostForMeasuredMultiRate(hostWindow);
         }
-
-        Wh_Log(L"REGISTER owner=%p tile=%p operationRoot=%p headerRoot=%p "
-               L"host=%p thread=%lu",
-               reinterpret_cast<void *>(owner),
-               reinterpret_cast<void *>(tile),
-               reinterpret_cast<void *>(operationTileRoot),
-               reinterpret_cast<void *>(tileHeaderRoot),
-               reinterpret_cast<void *>(hostWindow), GetCurrentThreadId());
 
         // Establish copy/move vs. delete before the first custom display-mode
         // application. That prevents a normal delete caption from being
@@ -5416,7 +5891,6 @@ namespace
             return false;
         }
 
-        bool firstNativeRate = false;
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
             auto it = std::find_if(
@@ -5434,7 +5908,6 @@ namespace
                 it->nativeDisplayRateValid &&
                 it->nativeDisplayRate >= 0.01;
 
-            firstNativeRate = !it->nativeDisplayRateValid;
             if (!keepPreviousDeleteRate)
             {
                 it->nativeDisplayRate = nativeDisplayRate;
@@ -5451,13 +5924,6 @@ namespace
             }
         }
 
-        if (firstNativeRate)
-        {
-            Wh_Log(L"NATIVE_RATE owner=%p tile=%p rate=%.3f "
-                   L"source=COperationStatusTileRateCalculator::_CalculateRate",
-                   reinterpret_cast<void *>(owner),
-                   reinterpret_cast<void *>(tile), nativeDisplayRate);
-        }
         InvalidateInfoPanelForTile(tile);
         return true;
     }
@@ -5498,7 +5964,6 @@ namespace
         }
 
         bool recorded = false;
-        bool firstNativeRate = false;
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
             auto it = std::find_if(
@@ -5510,7 +5975,6 @@ namespace
                 });
             if (it != g_transferSummaries.end())
             {
-                firstNativeRate = !it->nativeDisplayRateValid;
                 it->nativeDisplayRate = nativeDisplayRate;
                 it->nativeDisplayRateValid = true;
                 it->nativeRateHistory.push_back(nativeDisplayRate);
@@ -5528,15 +5992,6 @@ namespace
         }
         if (recorded)
         {
-            if (firstNativeRate)
-            {
-                Wh_Log(L"NATIVE_RATE owner=%p tile=%p bytesPerSecond=%llu "
-                       L"source=COperationStatusTileRateCalculator::_CalculateRate",
-                       reinterpret_cast<void *>(owner),
-                       reinterpret_cast<void *>(tile),
-                       static_cast<unsigned long long>(
-                           nativeDisplayRate + 0.5));
-            }
             ScheduleProgressCirclePosition(matchedHostWindow,
                                            L"native-rate");
         }
@@ -5621,18 +6076,14 @@ namespace
         unsigned long long transitionId,
         bool logResult = true)
     {
+        (void)transitionId;
+        (void)logResult;
         // Delete/recycle tiles can omit the copy/move speed-value pair.
         // Require the stable structural core and validate every optional
         // native element that actually exists.
         if (!elements.descriptionHeader || !elements.summary ||
             !elements.details || !elements.regularTile)
         {
-            if (logResult)
-            {
-                Wh_Log(L"MODE[%llu] DELETE_HIERARCHY result=FAIL "
-                       L"reason=missing-core-elements",
-                       transitionId);
-            }
             return false;
         }
 
@@ -5661,19 +6112,6 @@ namespace
             underOrMissing(elements.progressBar,
                            elements.progressBarContainer);
 
-        if (logResult)
-        {
-            Wh_Log(L"MODE[%llu] DELETE_HIERARCHY result=%s "
-                   L"speedLabel=%p speedValue=%p time=%p items=%p "
-                   L"chart=%p rateChart=%p",
-                   transitionId, valid ? L"PASS" : L"FAIL",
-                   reinterpret_cast<void *>(elements.speedLabel),
-                   reinterpret_cast<void *>(elements.speedValue),
-                   reinterpret_cast<void *>(elements.timeRemaining),
-                   reinterpret_cast<void *>(elements.itemsRemaining),
-                   reinterpret_cast<void *>(elements.chartArea),
-                   reinterpret_cast<void *>(elements.rateChart));
-        }
         return valid;
     }
 
@@ -5717,29 +6155,8 @@ namespace
         unsigned long long transitionId,
         bool logResult = true)
     {
-        auto getParent = [](DirectUI::Element *element)
-        {
-            return element ? Element_GetParent_Original(element) : nullptr;
-        };
-
-        DirectUI::Element *headerParent = getParent(elements.descriptionHeader);
-        DirectUI::Element *summaryParent = getParent(elements.summary);
-        DirectUI::Element *detailsParent = getParent(elements.details);
-        DirectUI::Element *speedLabelParent = getParent(elements.speedLabel);
-        DirectUI::Element *speedValueParent = getParent(elements.speedValue);
-        DirectUI::Element *timeLabelParent =
-            getParent(elements.timeRemainingLabel);
-        DirectUI::Element *timeValueParent =
-            getParent(elements.timeRemaining);
-        DirectUI::Element *itemsLabelParent =
-            getParent(elements.itemsRemainingLabel);
-        DirectUI::Element *itemsValueParent =
-            getParent(elements.itemsRemaining);
-        DirectUI::Element *chartAreaParent = getParent(elements.chartArea);
-        DirectUI::Element *rateChartParent = getParent(elements.rateChart);
-        DirectUI::Element *progressContainerParent =
-            getParent(elements.progressBarContainer);
-        DirectUI::Element *progressBarParent = getParent(elements.progressBar);
+        (void)transitionId;
+        (void)logResult;
 
         bool headerUnderRegular = IsElementDescendantOf(
             elements.descriptionHeader, elements.regularTile);
@@ -5777,138 +6194,6 @@ namespace
                      progressContainerUnderRegular &&
                      progressBarUnderContainer;
 
-        if (logResult)
-        {
-            auto passFail = [](bool passed)
-            { return passed ? L"PASS" : L"FAIL"; };
-            Wh_Log(
-                L"MODE[%llu] HIERARCHY "
-                L"headerUnderRegular=%s parent=%p "
-                L"summaryUnderRegular=%s parent=%p "
-                L"detailsUnderRegular=%s parent=%p "
-                L"speedLabelUnderDetails=%s parent=%p "
-                L"speedValueUnderDetails=%s parent=%p "
-                L"timeLabelUnderDetails=%s parent=%p "
-                L"timeValueUnderDetails=%s parent=%p "
-                L"itemsLabelUnderDetails=%s parent=%p "
-                L"itemsValueUnderDetails=%s parent=%p "
-                L"chartAreaUnderDetails=%s parent=%p "
-                L"rateChartUnderChartArea=%s parent=%p "
-                L"progressContainerUnderRegular=%s parent=%p "
-                L"progressBarUnderContainer=%s parent=%p result=%s",
-                transitionId, passFail(headerUnderRegular),
-                reinterpret_cast<void *>(headerParent),
-                passFail(summaryUnderRegular),
-                reinterpret_cast<void *>(summaryParent),
-                passFail(detailsUnderRegular),
-                reinterpret_cast<void *>(detailsParent),
-                passFail(speedLabelUnderDetails),
-                reinterpret_cast<void *>(speedLabelParent),
-                passFail(speedValueUnderDetails),
-                reinterpret_cast<void *>(speedValueParent),
-                passFail(timeLabelUnderDetails),
-                reinterpret_cast<void *>(timeLabelParent),
-                passFail(timeValueUnderDetails),
-                reinterpret_cast<void *>(timeValueParent),
-                passFail(itemsLabelUnderDetails),
-                reinterpret_cast<void *>(itemsLabelParent),
-                passFail(itemsValueUnderDetails),
-                reinterpret_cast<void *>(itemsValueParent),
-                passFail(chartAreaUnderDetails),
-                reinterpret_cast<void *>(chartAreaParent),
-                passFail(rateChartUnderChartArea),
-                reinterpret_cast<void *>(rateChartParent),
-                passFail(progressContainerUnderRegular),
-                reinterpret_cast<void *>(progressContainerParent),
-                passFail(progressBarUnderContainer),
-                reinterpret_cast<void *>(progressBarParent),
-                valid ? L"PASS" : L"FAIL");
-
-            auto logFailedChain = [transitionId](PCWSTR relationship,
-                                                  DirectUI::Element *element,
-                                                  bool passed)
-            {
-                if (passed)
-                {
-                    return;
-                }
-
-                constexpr unsigned int kMaximumAncestryDepth = 32;
-                DirectUI::Element *visited[kMaximumAncestryDepth]{};
-                std::wstring chain;
-                for (unsigned int depth = 0;
-                     depth < kMaximumAncestryDepth; ++depth)
-                {
-                    if (!element)
-                    {
-                        chain += chain.empty() ? L"null" : L" -> null";
-                        break;
-                    }
-
-                    bool repeated = false;
-                    for (unsigned int index = 0; index < depth; ++index)
-                    {
-                        if (visited[index] == element)
-                        {
-                            repeated = true;
-                            break;
-                        }
-                    }
-                    if (repeated)
-                    {
-                        chain += L" -> LOOP";
-                        break;
-                    }
-                    visited[depth] = element;
-
-                    wchar_t pointerText[32]{};
-                    std::swprintf(pointerText, ARRAYSIZE(pointerText),
-                                  L"%p",
-                                  reinterpret_cast<void *>(element));
-                    if (!chain.empty())
-                    {
-                        chain += L" -> ";
-                    }
-                    chain += pointerText;
-                    element = Element_GetParent_Original(element);
-                }
-
-                Wh_Log(L"MODE[%llu] HIERARCHY_CHAIN relationship=%s "
-                       L"chain=%s",
-                       transitionId, relationship, chain.c_str());
-            };
-
-            logFailedChain(L"headerUnderRegular",
-                           elements.descriptionHeader,
-                           headerUnderRegular);
-            logFailedChain(L"summaryUnderRegular", elements.summary,
-                           summaryUnderRegular);
-            logFailedChain(L"detailsUnderRegular", elements.details,
-                           detailsUnderRegular);
-            logFailedChain(L"speedLabelUnderDetails", elements.speedLabel,
-                           speedLabelUnderDetails);
-            logFailedChain(L"speedValueUnderDetails", elements.speedValue,
-                           speedValueUnderDetails);
-            logFailedChain(L"timeLabelUnderDetails",
-                           elements.timeRemainingLabel,
-                           timeLabelUnderDetails);
-            logFailedChain(L"timeValueUnderDetails", elements.timeRemaining,
-                           timeValueUnderDetails);
-            logFailedChain(L"itemsLabelUnderDetails",
-                           elements.itemsRemainingLabel,
-                           itemsLabelUnderDetails);
-            logFailedChain(L"itemsValueUnderDetails", elements.itemsRemaining,
-                           itemsValueUnderDetails);
-            logFailedChain(L"chartAreaUnderDetails", elements.chartArea,
-                           chartAreaUnderDetails);
-            logFailedChain(L"rateChartUnderChartArea", elements.rateChart,
-                           rateChartUnderChartArea);
-            logFailedChain(L"progressContainerUnderRegular",
-                           elements.progressBarContainer,
-                           progressContainerUnderRegular);
-            logFailedChain(L"progressBarUnderContainer", elements.progressBar,
-                           progressBarUnderContainer);
-        }
         return valid;
     }
 
@@ -6044,19 +6329,23 @@ namespace
         int nonClientWidth = windowWidth - clientWidth;
         int targetWindowWidth = targetClientWidth + nonClientWidth;
 
-        if ((windowHeight != targetWindowHeight ||
-             windowWidth != targetWindowWidth) &&
-            !SetWindowPos(hostWindow, nullptr, 0, 0, targetWindowWidth,
-                          targetWindowHeight,
-                          SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE))
+        if (windowHeight != targetWindowHeight ||
+            windowWidth != targetWindowWidth)
         {
-            Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT resize-failed host=%p "
-                   L"targetClientWidth=%d targetClientHeight=%d "
-                   L"targetWindowWidth=%d targetWindowHeight=%d error=%lu",
-                   transitionId, reinterpret_cast<void *>(hostWindow),
-                   targetClientWidth, targetClientHeight,
-                   targetWindowWidth, targetWindowHeight, GetLastError());
-            return false;
+            ScopedHostGeometryChange geometryChange(hostWindow, false);
+            if (!SetWindowPos(hostWindow, nullptr, 0, 0,
+                              targetWindowWidth, targetWindowHeight,
+                              SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE))
+            {
+                Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT resize-failed host=%p "
+                       L"targetClientWidth=%d targetClientHeight=%d "
+                       L"targetWindowWidth=%d targetWindowHeight=%d "
+                       L"error=%lu",
+                       transitionId, reinterpret_cast<void *>(hostWindow),
+                       targetClientWidth, targetClientHeight,
+                       targetWindowWidth, targetWindowHeight, GetLastError());
+                return false;
+            }
         }
 
         RECT windowAfter{};
@@ -6075,16 +6364,17 @@ namespace
                             actualClientWidth == targetClientWidth &&
                             actualClientHeight == targetClientHeight;
 
-        Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT host=%p expanded=%s "
-               L"targetClient=%dx%d actualClient=%dx%d "
-               L"targetWindow=%dx%d actualWindow=%dx%d result=%s",
-               transitionId, reinterpret_cast<void *>(hostWindow),
-               expanded ? L"true" : L"false",
-               targetClientWidth, targetClientHeight,
-               actualClientWidth, actualClientHeight,
-               targetWindowWidth, targetWindowHeight,
-               actualWindowWidth, actualWindowHeight,
-               sizeVerified ? L"verified" : L"rejected");
+        if (!sizeVerified)
+        {
+            Wh_Log(L"MODE[%llu] CUSTOM_LAYOUT resize-verification-failed "
+                   L"host=%p targetClient=%dx%d actualClient=%dx%d "
+                   L"targetWindow=%dx%d actualWindow=%dx%d",
+                   transitionId, reinterpret_cast<void *>(hostWindow),
+                   targetClientWidth, targetClientHeight,
+                   actualClientWidth, actualClientHeight,
+                   targetWindowWidth, targetWindowHeight,
+                   actualWindowWidth, actualWindowHeight);
+        }
         return sizeVerified;
     }
 
@@ -6122,10 +6412,6 @@ namespace
         if (IsHostInSpecialOperationState(hostWindow))
         {
             HideCustomPresentationForHost(hostWindow);
-            Wh_Log(L"MODE[%llu] PORTABLE_PRESENTATION owner=%p "
-                   L"result=skipped "
-                   L"reason=special-operation-state",
-                   transitionId, reinterpret_cast<void *>(owner));
             return false;
         }
 
@@ -6176,15 +6462,6 @@ namespace
 
         bool infoVisible = infoWindow && IsWindow(infoWindow) &&
                            IsWindowVisible(infoWindow);
-        Wh_Log(L"MODE[%llu] PORTABLE_PRESENTATION owner=%p host=%p "
-               L"expanded=%s tiles=%llu infoVisible=%s geometry=%s",
-               transitionId, reinterpret_cast<void *>(owner),
-               reinterpret_cast<void *>(hostWindow),
-               state.expanded ? L"true" : L"false",
-               static_cast<unsigned long long>(
-                   GetRegisteredTileCountForHost(hostWindow)),
-               infoVisible ? L"yes" : L"no",
-               geometryApplied ? L"yes" : L"no");
         return geometryApplied && infoVisible;
     }
 
@@ -6272,11 +6549,6 @@ namespace
         }
 
         unsigned long long transitionId = ++g_displayTransitionSequence;
-        Wh_Log(L"MODE[%llu] INITIAL_MODE owner=%p expanded=%s "
-               L"deleteLike=%s result=matched",
-               transitionId, reinterpret_cast<void *>(owner),
-               expanded ? L"true" : L"false",
-               deleteLike ? L"yes" : L"no");
         ApplyDisplayMode(owner, false, transitionId);
         ScheduleDeferredDisplaySnapshot(owner, transitionId, expanded);
     }
@@ -6444,18 +6716,7 @@ namespace
 
     void RecordNativeSummary(COperationStatusTile *owner, PCWSTR summary)
     {
-        {
-            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
-            auto it = std::find_if(
-                g_transferSummaries.begin(), g_transferSummaries.end(),
-                [owner](TransferSummaryState const &state)
-                { return state.owner == owner; });
-            if (it == g_transferSummaries.end())
-            {
-                return;
-            }
-            it->nativeSummary = summary ? summary : L"";
-        }
+        (void)summary;
         ApplyTransferSummary(owner);
     }
 
@@ -6525,7 +6786,13 @@ namespace
                               unsigned long long eventId,
                               NativeProgressSnapshot const &progress)
     {
-        if (!tile || !g_circleClassAtom || !g_infoPanelClassAtom)
+        if (g_unloading.load(std::memory_order_acquire) ||
+            !tile || !g_circleClassAtom || !g_infoPanelClassAtom)
+        {
+            return false;
+        }
+
+        if (g_unloading.load(std::memory_order_acquire))
         {
             return false;
         }
@@ -6553,10 +6820,6 @@ namespace
                 circleExists = true;
                 bool percentageChanged =
                     it->progressPercent != progress.percent;
-                bool rangeChanged =
-                    !it->progressRangeInitialized ||
-                    it->progressRangeLow != progress.rangeLow ||
-                    it->progressRangeHigh != progress.rangeHigh;
                 it->progressPercent = progress.percent;
                 it->progressRangeLow = progress.rangeLow;
                 it->progressRangeHigh = progress.rangeHigh;
@@ -6572,14 +6835,6 @@ namespace
                     it->eventId = eventId;
                 }
                 repaintNeeded = percentageChanged;
-                if (rangeChanged)
-                {
-                    Wh_Log(L"tile=%p progressRange low=%d high=%d "
-                           L"position=%d percent=%d",
-                           reinterpret_cast<void *>(tile), progress.rangeLow,
-                           progress.rangeHigh, progress.position,
-                           progress.percent);
-                }
             }
         }
         if (circleExists)
@@ -6623,25 +6878,40 @@ namespace
         {
             Wh_Log(L"eventId=%llu info-panel CreateWindowExW failed error=%lu",
                    eventId, GetLastError());
-            DestroyWindow(circleWindow);
+            CircleState cleanupState{
+                tile, circleWindow, nullptr, nullptr, hostWindow,
+                progress.percent, progress.rangeLow, progress.rangeHigh,
+                true, progress.rangeValid,
+                false, false,
+                eventId, 0, 0, 0, 0, false};
+            if (!CleanupCircleStateResources(&cleanupState, true))
+            {
+                RetainCleanupOnlyCircleState(
+                    cleanupState, L"information-panel-creation-failure");
+            }
             return false;
         }
 
+        CircleState newState{
+            tile, circleWindow, infoWindow, progressWindow, hostWindow,
+            progress.percent, progress.rangeLow, progress.rangeHigh,
+            true, progress.rangeValid,
+            false, false,
+            eventId, 0, 0, 0, 0, false};
+
+        if (!EnsureHostSubclass(hostWindow, eventId))
         {
-            std::lock_guard<std::mutex> lock(g_circleMutex);
-            g_circles.push_back(
-                {tile, circleWindow, infoWindow, progressWindow, hostWindow,
-                 progress.percent, progress.rangeLow, progress.rangeHigh,
-                 true, progress.rangeValid,
-                 false, false,
-                 eventId, 0, 0, 0, 0, false});
+            // The progress subclass is installed only after the required host
+            // subclass succeeds, so this HWND has no callback to remove.
+            newState.progressWindow = nullptr;
+            if (!CleanupCircleStateResources(&newState, true))
+            {
+                RetainCleanupOnlyCircleState(
+                    newState, L"host-subclass-installation-failure");
+            }
+            return false;
         }
 
-        Wh_Log(L"tile=%p progressRange low=%d high=%d position=%d percent=%d",
-               reinterpret_cast<void *>(tile), progress.rangeLow,
-               progress.rangeHigh, progress.position, progress.percent);
-
-        bool hostSubclassed = EnsureHostSubclass(hostWindow, eventId);
         bool progressSubclassed = true;
         if (progressWindow)
         {
@@ -6656,23 +6926,49 @@ namespace
             }
         }
 
+        bool shuttingDown = false;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            shuttingDown = g_unloading.load(std::memory_order_acquire);
+            if (!shuttingDown)
+            {
+                g_circles.push_back(newState);
+            }
+        }
+
+        if (shuttingDown)
+        {
+            if (!progressSubclassed)
+            {
+                newState.progressWindow = nullptr;
+            }
+            if (!CleanupCircleStateResources(&newState, true))
+            {
+                RetainCleanupOnlyCircleState(
+                    newState, L"activation-shutdown-race");
+            }
+            return false;
+        }
+
         ScheduleProgressCirclePosition(hostWindow, L"tile-added");
         InvalidateRect(circleWindow, nullptr, FALSE);
         InvalidateRect(infoWindow, nullptr, FALSE);
-        Wh_Log(L"eventId=%llu circle created tile=%p host=%p progressHwnd=%p "
-               L"infoHwnd=%p hostSubclass=%s progressSubclass=%s result=%s",
-               eventId, reinterpret_cast<void *>(tile),
-               reinterpret_cast<void *>(hostWindow),
-               reinterpret_cast<void *>(progressWindow),
-               reinterpret_cast<void *>(infoWindow),
-               hostSubclassed ? L"yes" : L"no",
-               progressSubclassed ? L"yes" : L"no",
-               hostSubclassed && progressSubclassed ? L"success" : L"failure");
         return true;
     }
 
     void UpdateProgressCircle(OperationTileElement *tile)
     {
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        ScopedPresentationActivation activationGuard;
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
         int fallbackPercent = 0;
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -6698,7 +6994,7 @@ namespace
 
     void DestroyProgressCircle(OperationTileElement *tile)
     {
-        CircleState removed{};
+        CircleState state{};
         bool found = false;
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -6708,8 +7004,7 @@ namespace
                 { return state.tile == tile; });
             if (it != g_circles.end())
             {
-                removed = *it;
-                g_circles.erase(it);
+                state = *it;
                 found = true;
             }
         }
@@ -6718,26 +7013,19 @@ namespace
             return;
         }
 
-        if (removed.progressWindow && IsWindow(removed.progressWindow))
+        if (!CleanupCircleStateResources(&state, true))
         {
-            RemoveWindowSubclass(removed.progressWindow,
-                                 NativeProgressWindowSubclassProc,
-                                 kProgressWindowSubclassId);
+            RetainCleanupOnlyCircleState(state, L"tile-destruction");
+            return;
         }
-        if (removed.infoWindow && IsWindow(removed.infoWindow))
+
+        EraseCircleStateRecord(state);
+        if (state.hostWindow && IsWindow(state.hostWindow))
         {
-            DestroyWindow(removed.infoWindow);
-        }
-        if (removed.circleWindow && IsWindow(removed.circleWindow))
-        {
-            DestroyWindow(removed.circleWindow);
-        }
-        if (removed.hostWindow && IsWindow(removed.hostWindow))
-        {
-            if (GetRegisteredTileCountForHost(removed.hostWindow) == 0)
+            if (GetRegisteredTileCountForHost(state.hostWindow) == 0)
             {
                 HWND footerWindow =
-                    GetFooterOverlayWindow(removed.hostWindow);
+                    GetFooterOverlayWindow(state.hostWindow);
                 if (footerWindow && IsWindow(footerWindow))
                 {
                     DestroyWindow(footerWindow);
@@ -6745,7 +7033,7 @@ namespace
             }
             else
             {
-                ScheduleProgressCirclePosition(removed.hostWindow,
+                ScheduleProgressCirclePosition(state.hostWindow,
                                                L"tile-removed");
             }
         }
@@ -6753,135 +7041,126 @@ namespace
 
     void DestroyAllProgressCircles()
     {
-        std::vector<HWND> circleWindows;
-        std::vector<HWND> infoWindows;
-        std::vector<HWND> hosts;
+        // Teardown is deliberately synchronous. Each host subclass receives
+        // the registered teardown message on its owning UI thread and does
+        // not acknowledge it until native visibility is restored, progress
+        // subclasses are removed, custom children are destroyed, and the host
+        // subclass itself is gone. Never time out into a DLL unload while a
+        // callback into this module can still exist.
+        std::vector<HWND> reportedHostFailures;
+        auto reportHostFailure =
+            [&reportedHostFailures](HWND hostWindow, PCWSTR reason)
         {
-            std::lock_guard<std::mutex> lock(g_circleMutex);
-            for (auto const &state : g_circles)
+            if (std::find(reportedHostFailures.begin(),
+                          reportedHostFailures.end(), hostWindow) !=
+                reportedHostFailures.end())
             {
-                circleWindows.push_back(state.circleWindow);
-                infoWindows.push_back(state.infoWindow);
+                return;
             }
-            hosts = g_subclassedHosts;
-        }
+            reportedHostFailures.push_back(hostWindow);
+            Wh_Log(L"Presentation teardown blocked host=%p reason=%s",
+                   reinterpret_cast<void *>(hostWindow), reason);
+        };
 
-        // Restore native duplicate visibility on each owning UI thread while
-        // tile-to-host registrations are still intact.
-        for (HWND hostWindow : hosts)
+        for (;;)
         {
-            if (!hostWindow || !IsWindow(hostWindow))
+            std::vector<HWND> hosts;
             {
-                continue;
+                std::lock_guard<std::mutex> lock(g_circleMutex);
+                hosts = g_subclassedHosts;
             }
-            DWORD hostThread =
-                GetWindowThreadProcessId(hostWindow, nullptr);
-            if (hostThread == GetCurrentThreadId())
-            {
-                RestoreNativePresentationForHost(hostWindow);
-            }
-            else
-            {
-                DWORD_PTR ignored;
-                SendMessageTimeoutW(
-                    hostWindow, g_removeHostSubclassMessage, 0, 0,
-                    SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &ignored);
-            }
-        }
 
-        for (HWND infoWindow : infoWindows)
-        {
-            if (infoWindow && IsWindow(infoWindow))
+            if (hosts.empty())
             {
-                DWORD windowThread =
-                    GetWindowThreadProcessId(infoWindow, nullptr);
-                if (windowThread == GetCurrentThreadId())
+                break;
+            }
+
+            bool madeProgress = false;
+            for (HWND hostWindow : hosts)
+            {
+                if (!hostWindow || !IsWindow(hostWindow))
                 {
-                    DestroyWindow(infoWindow);
+                    if (RemoveDestroyedHostRecords(hostWindow))
+                    {
+                        madeProgress = true;
+                    }
+                    else
+                    {
+                        reportHostFailure(
+                            hostWindow,
+                            L"live child/progress state for destroyed host");
+                    }
+                    continue;
+                }
+
+                DWORD_PTR result = FALSE;
+                if (SendMessageTimeoutW(
+                        hostWindow, g_removeHostSubclassMessage, 0, 0,
+                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &result) &&
+                    result == TRUE)
+                {
+                    madeProgress = true;
                 }
                 else
                 {
-                    DWORD_PTR ignored;
-                    SendMessageTimeoutW(
-                        infoWindow, WM_CLOSE, 0, 0,
-                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &ignored);
+                    reportHostFailure(hostWindow,
+                                      L"owning thread did not acknowledge");
                 }
+            }
+
+            if (!madeProgress)
+            {
+                // A retry is safer than allowing Windhawk to unload the DLL
+                // with a live window procedure or subclass. The owning UI
+                // thread remains the only thread that performs destruction.
+                Sleep(10);
             }
         }
 
-        for (HWND circleWindow : circleWindows)
+        for (;;)
         {
-            if (!circleWindow || !IsWindow(circleWindow))
+            CircleState state{};
+            bool circlesRemain = false;
             {
-                continue;
+                std::lock_guard<std::mutex> lock(g_circleMutex);
+                circlesRemain = !g_circles.empty();
+                if (!circlesRemain)
+                {
+                    g_hostPositionRequests.clear();
+                }
+                else
+                {
+                    state = g_circles.front();
+                }
             }
-            DWORD windowThread =
-                GetWindowThreadProcessId(circleWindow, nullptr);
-            if (windowThread == GetCurrentThreadId())
+
+            if (!circlesRemain)
             {
-                DestroyWindow(circleWindow);
+                break;
+            }
+
+            // Provisional activation and normal tile cleanup retain their
+            // CircleState until every callback-bearing resource is verified
+            // gone. Retry such cleanup on each HWND's owning thread.
+            if (CleanupCircleStateResources(&state, true))
+            {
+                EraseCircleStateRecord(state);
             }
             else
             {
-                DWORD_PTR ignored;
-                if (!SendMessageTimeoutW(
-                        circleWindow, WM_CLOSE, 0, 0,
-                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &ignored))
-                {
-                    Wh_Log(L"Circle cleanup: WM_CLOSE failed hwnd=%p "
-                           L"error=%lu",
-                           reinterpret_cast<void *>(circleWindow),
-                           GetLastError());
-                }
+                RetainCleanupOnlyCircleState(
+                    state, L"global-teardown-retry");
+                Sleep(10);
             }
         }
 
-        for (HWND hostWindow : hosts)
-        {
-            if (!hostWindow || !IsWindow(hostWindow))
-            {
-                continue;
-            }
-            if (ShouldApplyNativeColorOverrides())
-            {
-                ResetUnifiedHostChrome(hostWindow);
-            }
-            HWND footerWindow = GetFooterOverlayWindow(hostWindow);
-            if (footerWindow && IsWindow(footerWindow))
-            {
-                DestroyWindow(footerWindow);
-            }
-            DWORD windowThread =
-                GetWindowThreadProcessId(hostWindow, nullptr);
-            if (windowThread == GetCurrentThreadId())
-            {
-                RemoveWindowSubclass(hostWindow,
-                                     OperationStatusWindowSubclassProc,
-                                     kHostWindowSubclassId);
-            }
-            else
-            {
-                DWORD_PTR ignored;
-                if (!SendMessageTimeoutW(
-                        hostWindow, g_removeHostSubclassMessage, 0, 0,
-                        SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &ignored))
-                {
-                    Wh_Log(L"Circle cleanup: host subclass removal failed "
-                           L"hwnd=%p error=%lu",
-                           reinterpret_cast<void *>(hostWindow),
-                           GetLastError());
-                }
-            }
-        }
-        {
-            std::lock_guard<std::mutex> lock(g_circleMutex);
-            g_circles.clear();
-            g_subclassedHosts.clear();
-            g_hostPositionRequests.clear();
-        }
         {
             std::lock_guard<std::mutex> lock(g_hostPresentationMutex);
             g_hostPresentationStates.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_hostNativeGeometryMutex);
+            g_hostNativeGeometries.clear();
         }
     }
 
@@ -7017,29 +7296,14 @@ namespace
             return false;
         }
 
-        Wh_Log(L"presentation renderer=single-buffered-info-surface "
-               L"circle=embedded footer-overlay=root");
         return true;
     }
 
     void ShutdownProgressCircleUi()
     {
-        std::vector<HWND> footerHosts;
-        {
-            std::lock_guard<std::mutex> lock(g_circleMutex);
-            footerHosts = g_subclassedHosts;
-        }
-
-        for (HWND hostWindow : footerHosts)
-        {
-            HWND footerWindow =
-                GetFooterOverlayWindow(hostWindow);
-            if (footerWindow && IsWindow(footerWindow))
-            {
-                DestroyWindow(footerWindow);
-            }
-        }
-
+        // Wh_ModBeforeUninit performs the owning-thread teardown while hooks
+        // are still installed. This is an idempotent verification for init
+        // failure and final resource shutdown paths.
         DestroyAllProgressCircles();
 
         if (g_footerOverlayClassAtom)
@@ -7102,7 +7366,8 @@ namespace
         OperationTileElement_OnPropertyChanged_Original(
             thisPtr, property, propertyIndex, oldValue, newValue);
 
-        if (!isProgressPosition)
+        if (g_unloading.load(std::memory_order_acquire) ||
+            !isProgressPosition)
         {
             return;
         }
@@ -7132,7 +7397,8 @@ namespace
                 thisPtr, completedItems, totalItems, completedBytes,
                 totalBytes);
         g_nativeRateOwnerHint = previousRateOwnerHint;
-        if (SUCCEEDED(result))
+        if (!g_unloading.load(std::memory_order_acquire) &&
+            SUCCEEDED(result))
         {
             RecordTransferBytes(thisPtr, completedItems, totalItems,
                                 completedBytes, totalBytes);
@@ -7146,7 +7412,8 @@ namespace
     {
         HRESULT result = COperationStatusTile_UpdateSummary_Original(
             thisPtr, summary);
-        if (SUCCEEDED(result))
+        if (!g_unloading.load(std::memory_order_acquire) &&
+            SUCCEEDED(result))
         {
             RecordNativeSummary(thisPtr, summary);
         }
@@ -7167,7 +7434,8 @@ namespace
         double result = COperationStatusTileRateCalculator_CalculateRate_Original(
             thisPtr, value1, value2, value3, value4, value5, value6,
             value7, secondaryRate);
-        if (std::isfinite(result) && result >= 0.0 &&
+        if (!g_unloading.load(std::memory_order_acquire) &&
+            std::isfinite(result) && result >= 0.0 &&
             result <= static_cast<double>(
                           std::numeric_limits<LONGLONG>::max()))
         {
@@ -7185,6 +7453,12 @@ namespace
         COperationStatusTile *thisPtr,
         bool expanded)
     {
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return COperationStatusTile_SetTileDisplayMode_Original(
+                thisPtr, expanded);
+        }
+
         unsigned long long transitionId = ++g_displayTransitionSequence;
 
         COperationStatusTile *canonicalOwner = nullptr;
@@ -7300,9 +7574,16 @@ namespace
 
         int nonClientWidth = resizeResult.beforeWidth - currentClientWidth;
         int targetWindowWidth = targetClientWidth + nonClientWidth;
-        if (!SetWindowPos(context.operationStatusWindow, nullptr, 0, 0,
-                          targetWindowWidth, resizeResult.beforeHeight,
-                          SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE))
+        BOOL resized = FALSE;
+        {
+            ScopedHostGeometryChange geometryChange(
+                context.operationStatusWindow, false);
+            resized = SetWindowPos(
+                context.operationStatusWindow, nullptr, 0, 0,
+                targetWindowWidth, resizeResult.beforeHeight,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (!resized)
         {
             Wh_Log(L"eventId=%llu base-layout SetWindowPos failed "
                    L"requestedWidth=%d error=%lu",
@@ -7353,6 +7634,12 @@ namespace
         unsigned long arg2,
         DirectUI::Element *parentElement)
     {
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return COperationStatusTile_CreateTileElement_Original(
+                thisPtr, arg1, arg2, parentElement);
+        }
+
         ScopedTileSkin skinScope;
         if (!skinScope.OwnsSkin())
         {
@@ -7366,6 +7653,11 @@ namespace
 
         auto &state = g_skinState;
         state.collecting = false;
+
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return result;
+        }
 
         if (FAILED(result))
         {
@@ -7394,8 +7686,22 @@ namespace
         // Only the top-level HWND is sized. Native DirectUI geometry, fonts,
         // colors, and parentage are never modified; duplicate normal-mode
         // visuals are hidden later and restored for native fallback.
+        ScopedPresentationActivation activationGuard;
+        if (g_unloading.load(std::memory_order_acquire))
+        {
+            return result;
+        }
+        if (!EnsureProgressCircle(operationTile, eventId, initialProgress))
+        {
+            if (!g_unloading.load(std::memory_order_acquire))
+            {
+                Wh_Log(L"eventId=%llu presentation activation failed; "
+                       L"native Explorer presentation retained",
+                       eventId);
+            }
+            return result;
+        }
         EnsureOperationStatusWindowWidth(eventId);
-        EnsureProgressCircle(operationTile, eventId, initialProgress);
         RegisterTransferSummary(thisPtr, operationTile, operationTileRoot,
                                 state.tileHeaderRoot);
         return result;
@@ -7468,9 +7774,6 @@ namespace
                 GetProcAddress(
                     dui70,
                     "?GetContentString@Element@DirectUI@@QEAAPEBGPEAPEAVValue@2@@Z"));
-        Wh_Log(L"Portable description bridge GetContentString=%p",
-               reinterpret_cast<void *>(
-                   Element_GetContentString_Optional));
         // 0.12 requires read-only discovery/state exports plus SetVisible for
         // reversible suppression of duplicate normal-mode visuals.
         if (!targets->parserCreate || !targets->strToID ||
@@ -7681,7 +7984,8 @@ namespace
 
 BOOL Wh_ModInit()
 {
-    Wh_Log(L"File Operation Styler 0.12.10 font-list initialization started");
+    g_unloading.store(false, std::memory_order_release);
+    Wh_Log(L"File Operation Styler 0.12.11 initialization started");
 
     LoadSettings();
 
@@ -7697,8 +8001,24 @@ BOOL Wh_ModInit()
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 0.12.10 font-list ready");
+    Wh_Log(L"File Operation Styler 0.12.11 initialization complete");
     return TRUE;
+}
+
+void Wh_ModBeforeUninit()
+{
+    if (g_unloading.exchange(true, std::memory_order_acq_rel))
+    {
+        return;
+    }
+
+    Wh_Log(L"File Operation Styler 0.12.11 presentation teardown started");
+    while (g_presentationActivations.load(std::memory_order_acquire) != 0)
+    {
+        Sleep(1);
+    }
+    DestroyAllProgressCircles();
+    Wh_Log(L"File Operation Styler 0.12.11 presentation teardown complete");
 }
 
 void Wh_ModUninit()
@@ -7709,7 +8029,8 @@ void Wh_ModUninit()
         g_transferSummaries.clear();
     }
     ClearSkinState();
-    Wh_Log(L"File Operation Styler 0.12.10 font-list uninitialization complete");
+    ShutdownDwmApi();
+    Wh_Log(L"File Operation Styler 0.12.11 uninitialization complete");
 }
 
 
