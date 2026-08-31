@@ -19,9 +19,8 @@ A modern replacement for the standard Windows 11 file operation window.
 
 File Operation Styler gives copy, move, delete, and recycle operations a cleaner modern layout while keeping the normal Windows file operation behavior.
 
-## Screenshots
-
 ![File Operation Styler](https://raw.githubusercontent.com/digart11/File-Operation-Styler/master/images/file-operation-styler.png)
+
 
 ### Default vs File Operation Styler
 
@@ -46,9 +45,6 @@ File Operation Styler gives copy, move, delete, and recycle operations a cleaner
 
 Choose one of the included themes or adjust a few basic options to create your own look.
 
-## Screenshots
-
-![Themes](images/file-operation-styler-themes.png)
 
 ## Notes
 

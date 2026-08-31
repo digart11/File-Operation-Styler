@@ -33,12 +33,6 @@ File Operation Styler gives copy, move, delete, and recycle operations a cleaner
 
 Choose one of the included themes or adjust a few basic options to create your own look.
 
-## Screenshots
-
-![File Operation Styler](images/file-operation-styler.png)
-
-![Themes](images/file-operation-styler-themes.png)
-
 ## Notes
 
 File Operation Styler changes the appearance of the normal file operation window only.  
