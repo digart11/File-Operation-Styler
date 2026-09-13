@@ -4598,9 +4598,24 @@ if (!hostWindow)
         }
     }
 
+    void RestoreGlassDirectUiForHost(HWND hostWindow);
+
     void HideCustomPresentationForHost(HWND hostWindow)
     {
+        // Special Explorer states must temporarily leave the
+        // full-client Acrylic presentation before native DirectUI
+        // becomes visible again.
+        if (kGlassHostOnlyProbe)
+        {
+            ResetUnifiedHostChrome(hostWindow);
+        }
+
         RestoreNativePresentationForHost(hostWindow);
+
+        if (kGlassHostOnlyProbe)
+        {
+            RestoreGlassDirectUiForHost(hostWindow);
+        }
         if (ShouldApplyNativeColorOverrides())
         {
             ResetUnifiedHostChrome(hostWindow);
@@ -4653,7 +4668,7 @@ if (!hostWindow)
     void ScheduleCustomReapplyForHost(HWND hostWindow,
                                       bool resumeTransferState)
     {
-        if (ShouldApplyNativeColorOverrides())
+        if (kGlassHostOnlyProbe || ShouldApplyNativeColorOverrides())
         {
             ApplyUnifiedHostChrome(hostWindow);
         }
@@ -5230,28 +5245,31 @@ if (!hostWindow)
                 L"Glass test: host buffered WM_PAINT hwnd=%p",
                 reinterpret_cast<void *>(window));
 
-            static bool preparedHost = false;
-
-            if (!preparedHost)
+            // Native conflict/permission/file-in-use pages own the
+            // host while Explorer is in a special operation state.
+            if (IsHostInSpecialOperationState(window))
             {
-                preparedHost = true;
+                return DefSubclassProc(
+                    window, message, wParam, lParam);
+            }
 
-                HWND directUi = nullptr;
-
-                while ((directUi = FindWindowExW(
-                            window,
-                            directUi,
-                            L"DirectUIHWND",
-                            nullptr)) != nullptr)
+            // Normal glass mode owns the visible presentation.
+            // Hide DirectUI whenever Explorer has made it visible
+            // again, including after returning from a special state.
+            HWND directUi = nullptr;
+            while ((directUi = FindWindowExW(
+                        window,
+                        directUi,
+                        L"DirectUIHWND",
+                        nullptr)) != nullptr)
+            {
+                if (IsWindowVisible(directUi))
                 {
                     Wh_Log(
-                        L"Glass test: hiding DirectUIHWND hwnd=%p visible=%d",
-                        reinterpret_cast<void *>(directUi),
-                        IsWindowVisible(directUi) ? 1 : 0);
+                        L"Glass normal state: hiding DirectUIHWND hwnd=%p",
+                        reinterpret_cast<void *>(directUi));
 
-                    ShowWindow(
-                        directUi,
-                        SW_HIDE);
+                    ShowWindow(directUi, SW_HIDE);
                 }
             }
 
