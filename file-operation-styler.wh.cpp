@@ -1,6 +1,6 @@
 // ==WindhawkMod==
-// @id              file-operation-styler
-// @name            File Operation Styler
+// @id              file-operation-styler-glass-test
+// @name            File Operation Styler Glass Test
 // @description     Portable custom presentation for native Explorer file operations with a skin-safe unified presentation.
 // @version         1.0.0
 // @author          digART
@@ -137,6 +137,9 @@ Settings changes apply to new file-operation windows; operations already in prog
 #include <gdiplus.h>
 #include <shlwapi.h>
 #include <windows.h>
+
+
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <atomic>
@@ -1085,6 +1088,14 @@ namespace
     constexpr DWORD kDwmwaCaptionColor = 35;
     constexpr DWORD kDwmwaTextColor = 36;
     constexpr COLORREF kDwmColorDefault = 0xFFFFFFFF;
+    constexpr DWORD kDwmwaSystemBackdropType = 38;
+    constexpr int kDwmsbtAuto = 0;
+    constexpr int kDwmsbtTransientWindow = 3;
+
+    // GLASS TEST: expose only the real OperationStatusWindow client.
+    constexpr bool kGlassHostOnlyProbe = true;
+
+    static thread_local bool g_glassTransparentInfoPanelPaint = false;
 
     using DwmSetWindowAttribute_t = HRESULT(WINAPI *)(
         HWND hwnd, DWORD attribute, LPCVOID value, DWORD valueSize);
@@ -1131,15 +1142,88 @@ namespace
         }
     }
 
-    void ApplyUnifiedHostChrome(HWND hostWindow)
+    struct GlassFrameMargins
     {
-        if (!ShouldApplyNativeColorOverrides())
+        int left;
+        int right;
+        int top;
+        int bottom;
+    };
+
+    using DwmExtendFrameIntoClientArea_t =
+        HRESULT(WINAPI *)(
+            HWND hwnd,
+            GlassFrameMargins const *margins);
+
+    void SetGlassClientFrameExtension(
+        HWND hostWindow,
+        bool enabled)
+    {
+        if (!hostWindow || !IsWindow(hostWindow))
         {
             return;
         }
 
+        HMODULE module =
+            GetModuleHandleW(L"dwmapi.dll");
+
+        if (!module)
+        {
+            return;
+        }
+
+        auto extendFrame =
+            reinterpret_cast<DwmExtendFrameIntoClientArea_t>(
+                GetProcAddress(
+                    module,
+                    "DwmExtendFrameIntoClientArea"));
+
+        if (!extendFrame)
+        {
+            return;
+        }
+
+        GlassFrameMargins margins =
+            enabled
+                ? GlassFrameMargins{-1, -1, -1, -1}
+                : GlassFrameMargins{0, 0, 0, 0};
+
+        HRESULT result =
+            extendFrame(
+                hostWindow,
+                &margins);
+
+        Wh_Log(
+            L"Glass test: ExtendFrame fullClient=%s result=0x%08X hwnd=%p",
+            enabled ? L"yes" : L"no",
+            static_cast<unsigned int>(result),
+            reinterpret_cast<void *>(hostWindow));
+    }
+
+    void ApplyUnifiedHostChrome(HWND hostWindow)
+    {
         DwmSetWindowAttribute_t setAttribute = GetDwmSetWindowAttribute();
         if (!setAttribute || !hostWindow || !IsWindow(hostWindow))
+        {
+            return;
+        }
+
+        int backdropType = kDwmsbtTransientWindow;
+        HRESULT backdropResult =
+            setAttribute(
+                hostWindow,
+                kDwmwaSystemBackdropType,
+                &backdropType,
+                sizeof(backdropType));
+
+        Wh_Log(
+            L"Glass test: SYSTEMBACKDROP_TYPE result=0x%08X hwnd=%p",
+            static_cast<unsigned int>(backdropResult),
+            reinterpret_cast<void *>(hostWindow));
+
+        SetGlassClientFrameExtension(hostWindow, true);
+
+        if (!ShouldApplyNativeColorOverrides())
         {
             return;
         }
@@ -1148,16 +1232,31 @@ namespace
         COLORREF captionColor = kBackgroundColor;
         COLORREF textColor = kPrimaryTextColor;
         COLORREF borderColor = kInactiveRingColor;
-        setAttribute(hostWindow, kDwmwaUseImmersiveDarkMode,
-                     &darkMode, sizeof(darkMode));
-        setAttribute(hostWindow, kDwmwaCaptionColor,
-                     &captionColor, sizeof(captionColor));
-        setAttribute(hostWindow, kDwmwaTextColor,
-                     &textColor, sizeof(textColor));
-        setAttribute(hostWindow, kDwmwaBorderColor,
-                     &borderColor, sizeof(borderColor));
-    }
 
+        setAttribute(
+            hostWindow,
+            kDwmwaUseImmersiveDarkMode,
+            &darkMode,
+            sizeof(darkMode));
+
+        setAttribute(
+            hostWindow,
+            kDwmwaCaptionColor,
+            &captionColor,
+            sizeof(captionColor));
+
+        setAttribute(
+            hostWindow,
+            kDwmwaTextColor,
+            &textColor,
+            sizeof(textColor));
+
+        setAttribute(
+            hostWindow,
+            kDwmwaBorderColor,
+            &borderColor,
+            sizeof(borderColor));
+    }
     void ResetUnifiedHostChrome(HWND hostWindow)
     {
         DwmSetWindowAttribute_t setAttribute = GetDwmSetWindowAttribute();
@@ -1166,17 +1265,43 @@ namespace
             return;
         }
 
+        SetGlassClientFrameExtension(hostWindow, false);
+
         BOOL systemDarkMode = IsWindowsAppsDarkMode() ? TRUE : FALSE;
-        setAttribute(hostWindow, kDwmwaUseImmersiveDarkMode,
-                     &systemDarkMode, sizeof(systemDarkMode));
+
+        setAttribute(
+            hostWindow,
+            kDwmwaUseImmersiveDarkMode,
+            &systemDarkMode,
+            sizeof(systemDarkMode));
 
         COLORREF defaultColor = kDwmColorDefault;
-        setAttribute(hostWindow, kDwmwaCaptionColor,
-                     &defaultColor, sizeof(defaultColor));
-        setAttribute(hostWindow, kDwmwaTextColor,
-                     &defaultColor, sizeof(defaultColor));
-        setAttribute(hostWindow, kDwmwaBorderColor,
-                     &defaultColor, sizeof(defaultColor));
+
+        setAttribute(
+            hostWindow,
+            kDwmwaCaptionColor,
+            &defaultColor,
+            sizeof(defaultColor));
+
+        setAttribute(
+            hostWindow,
+            kDwmwaTextColor,
+            &defaultColor,
+            sizeof(defaultColor));
+
+        setAttribute(
+            hostWindow,
+            kDwmwaBorderColor,
+            &defaultColor,
+            sizeof(defaultColor));
+
+        int backdropType = kDwmsbtAuto;
+
+        setAttribute(
+            hostWindow,
+            kDwmwaSystemBackdropType,
+            &backdropType,
+            sizeof(backdropType));
     }
 
 #define kDisplayModeFooterReserveHeight (ActiveLayout().footerReserveHeight)
@@ -1555,7 +1680,7 @@ namespace
     size_t GetRegisteredTileCountForHost(HWND hostWindow);
     void MarkHostForMeasuredMultiRate(HWND hostWindow)
     {
-        if (!hostWindow)
+if (!hostWindow)
         {
             return;
         }
@@ -2297,23 +2422,42 @@ namespace
         graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
         graphics.SetTextRenderingHint(
-            Gdiplus::TextRenderingHintClearTypeGridFit);
+            g_glassTransparentInfoPanelPaint
+                ? Gdiplus::TextRenderingHintAntiAliasGridFit
+                : Gdiplus::TextRenderingHintClearTypeGridFit);
 
         Gdiplus::SolidBrush backgroundBrush(Gdiplus::Color(
             255, GetRValue(theme.background), GetGValue(theme.background),
             GetBValue(theme.background)));
-        graphics.FillRectangle(&backgroundBrush, 0, 0, width, height);
+        if (!g_glassTransparentInfoPanelPaint)
+        {
+            graphics.FillRectangle(
+                &backgroundBrush,
+                0,
+                0,
+                width,
+                height);
+        }
 
         DrawEmbeddedProgressCircle(
             graphics, dpi, snapshot.percent, theme, type);
 
+        int effectiveBodySize =
+            type.bodySize +
+            (g_glassTransparentInfoPanelPaint ? 1 : 0);
+
+        PCWSTR effectiveBodyFont =
+            g_glassTransparentInfoPanelPaint
+                ? L"Segoe UI Semibold"
+                : type.bodyFont.c_str();
+
         Gdiplus::Font detailFont(
-            type.bodyFont.c_str(),
-            static_cast<Gdiplus::REAL>(ScaleForDpi(type.bodySize, dpi)),
+            effectiveBodyFont,
+            static_cast<Gdiplus::REAL>(ScaleForDpi(effectiveBodySize, dpi)),
             Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::Font detailFallback(
             L"Segoe UI",
-            static_cast<Gdiplus::REAL>(ScaleForDpi(type.bodySize, dpi)),
+            static_cast<Gdiplus::REAL>(ScaleForDpi(effectiveBodySize, dpi)),
             Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::Font *selectedFont =
             detailFont.GetLastStatus() == Gdiplus::Ok
@@ -2330,12 +2474,12 @@ namespace
             255, GetRValue(theme.accent),
             GetGValue(theme.accent), GetBValue(theme.accent)));
         Gdiplus::Font linkFont(
-            type.bodyFont.c_str(),
-            static_cast<Gdiplus::REAL>(ScaleForDpi(type.bodySize, dpi)),
+            effectiveBodyFont,
+            static_cast<Gdiplus::REAL>(ScaleForDpi(effectiveBodySize, dpi)),
             Gdiplus::FontStyleUnderline, Gdiplus::UnitPixel);
         Gdiplus::Font linkFallback(
             L"Segoe UI",
-            static_cast<Gdiplus::REAL>(ScaleForDpi(type.bodySize, dpi)),
+            static_cast<Gdiplus::REAL>(ScaleForDpi(effectiveBodySize, dpi)),
             Gdiplus::FontStyleUnderline, Gdiplus::UnitPixel);
         Gdiplus::Font *selectedLinkFont =
             linkFont.GetLastStatus() == Gdiplus::Ok
@@ -3079,8 +3223,17 @@ namespace
         SetRectEmpty(cancelRect);
 
         RECT clientRect{};
-        UINT dpi = GetDpiForWindow(infoWindow);
-        if (!dpi || !GetClientRect(infoWindow, &clientRect) ||
+        HWND geometryWindow = infoWindow;
+        if (g_glassTransparentInfoPanelPaint)
+        {
+            HWND hostWindow = GetAncestor(infoWindow, GA_ROOT);
+            if (hostWindow && IsWindow(hostWindow))
+            {
+                geometryWindow = hostWindow;
+            }
+        }
+        UINT dpi = GetDpiForWindow(geometryWindow);
+        if (!dpi || !GetClientRect(geometryWindow, &clientRect) ||
             !ActiveElements().showCancel)
         {
             return;
@@ -3106,8 +3259,17 @@ namespace
         SetRectEmpty(pauseRect);
 
         RECT clientRect{};
-        UINT dpi = GetDpiForWindow(infoWindow);
-        if (!dpi || !GetClientRect(infoWindow, &clientRect))
+        HWND geometryWindow = infoWindow;
+        if (g_glassTransparentInfoPanelPaint)
+        {
+            HWND hostWindow = GetAncestor(infoWindow, GA_ROOT);
+            if (hostWindow && IsWindow(hostWindow))
+            {
+                geometryWindow = hostWindow;
+            }
+        }
+        UINT dpi = GetDpiForWindow(geometryWindow);
+        if (!dpi || !GetClientRect(geometryWindow, &clientRect))
         {
             return;
         }
@@ -4710,6 +4872,199 @@ namespace
         }
     }
 
+    struct GlassBufferedPaintApi
+    {
+        using Init_t =
+            HRESULT(WINAPI *)();
+
+        using UnInit_t =
+            HRESULT(WINAPI *)();
+
+        using Begin_t =
+            HPAINTBUFFER(WINAPI *)(
+                HDC,
+                RECT const *,
+                BP_BUFFERFORMAT,
+                BP_PAINTPARAMS *,
+                HDC *);
+
+        using End_t =
+            HRESULT(WINAPI *)(
+                HPAINTBUFFER,
+                BOOL);
+
+        using SetAlpha_t =
+            HRESULT(WINAPI *)(
+                HPAINTBUFFER,
+                RECT const *,
+                BYTE);
+
+        HMODULE module = nullptr;
+        Init_t init = nullptr;
+        UnInit_t uninit = nullptr;
+        Begin_t begin = nullptr;
+        End_t end = nullptr;
+        SetAlpha_t setAlpha = nullptr;
+    };
+
+    GlassBufferedPaintApi *GetGlassBufferedPaintApi()
+    {
+        static GlassBufferedPaintApi api{};
+        static bool initialized = false;
+
+        if (!initialized)
+        {
+            initialized = true;
+
+            api.module =
+                GetModuleHandleW(L"uxtheme.dll");
+
+            if (!api.module)
+            {
+                api.module =
+                    LoadLibraryW(L"uxtheme.dll");
+            }
+
+            if (api.module)
+            {
+                api.init =
+                    reinterpret_cast<GlassBufferedPaintApi::Init_t>(
+                        GetProcAddress(
+                            api.module,
+                            "BufferedPaintInit"));
+
+                api.uninit =
+                    reinterpret_cast<GlassBufferedPaintApi::UnInit_t>(
+                        GetProcAddress(
+                            api.module,
+                            "BufferedPaintUnInit"));
+
+                api.begin =
+                    reinterpret_cast<GlassBufferedPaintApi::Begin_t>(
+                        GetProcAddress(
+                            api.module,
+                            "BeginBufferedPaint"));
+
+                api.end =
+                    reinterpret_cast<GlassBufferedPaintApi::End_t>(
+                        GetProcAddress(
+                            api.module,
+                            "EndBufferedPaint"));
+
+                api.setAlpha =
+                    reinterpret_cast<GlassBufferedPaintApi::SetAlpha_t>(
+                        GetProcAddress(
+                            api.module,
+                            "BufferedPaintSetAlpha"));
+            }
+        }
+
+        if (!api.init ||
+            !api.uninit ||
+            !api.begin ||
+            !api.end ||
+            !api.setAlpha)
+        {
+            return nullptr;
+        }
+
+        return &api;
+    }
+
+    // GLASS_LIFECYCLE_RESTORED
+
+    void RestoreGlassDirectUiForHost(HWND hostWindow)
+    {
+        if (!hostWindow || !IsWindow(hostWindow))
+        {
+            return;
+        }
+
+        HWND directUi = nullptr;
+
+        while ((directUi = FindWindowExW(
+                    hostWindow,
+                    directUi,
+                    L"DirectUIHWND",
+                    nullptr)) != nullptr)
+        {
+            if (!IsWindowVisible(directUi))
+            {
+                Wh_Log(
+                    L"Glass teardown: restoring DirectUIHWND hwnd=%p",
+                    reinterpret_cast<void *>(directUi));
+
+                ShowWindow(
+                    directUi,
+                    SW_SHOWNA);
+            }
+        }
+    }
+
+    bool DrawGlassHostProgressRing(HWND hostWindow, HDC deviceContext)
+    {
+        if (!hostWindow || !deviceContext)
+        {
+            return false;
+        }
+
+        int progressPercent = 0;
+        bool found = false;
+
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+
+            for (CircleState const &state : g_circles)
+            {
+                if (state.hostWindow == hostWindow && state.tile)
+                {
+                    progressPercent =
+                        std::clamp(state.progressPercent, 0, 100);
+
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found)
+        {
+            return false;
+        }
+
+        UINT dpi = GetDpiForWindow(hostWindow);
+        if (!dpi)
+        {
+            dpi = USER_DEFAULT_SCREEN_DPI;
+        }
+
+        ThemePalette theme =
+            GetDrawingTheme(hostWindow);
+
+        TypographyConfig const &type =
+            ActiveTypography();
+
+        Gdiplus::Graphics graphics(deviceContext);
+
+        graphics.SetSmoothingMode(
+            Gdiplus::SmoothingModeAntiAlias);
+
+        graphics.SetPixelOffsetMode(
+            Gdiplus::PixelOffsetModeHighQuality);
+
+        graphics.SetTextRenderingHint(
+            Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+        DrawEmbeddedProgressCircle(
+            graphics,
+            dpi,
+            progressPercent,
+            theme,
+            type);
+
+        return true;
+    }
+
     LRESULT CALLBACK OperationStatusWindowSubclassProc(
         HWND window,
         UINT message,
@@ -4721,31 +5076,43 @@ namespace
         if (message == WM_WINDOWPOSCHANGING && lParam)
         {
             CaptureHostNativeGeometry(
-                window, *reinterpret_cast<WINDOWPOS *>(lParam));
+                window,
+                *reinterpret_cast<WINDOWPOS *>(lParam));
         }
 
         if (g_unloading.load(std::memory_order_acquire) &&
             message != g_removeHostSubclassMessage &&
             message != WM_NCDESTROY)
         {
-            return DefSubclassProc(window, message, wParam, lParam);
+            return DefSubclassProc(
+                window,
+                message,
+                wParam,
+                lParam);
         }
 
         if (g_removeHostSubclassMessage &&
             message == g_removeHostSubclassMessage &&
             wParam == kRemoveProgressWindowSubclassCommand)
         {
-            HWND progressWindow = reinterpret_cast<HWND>(lParam);
-            if (!progressWindow || !IsWindow(progressWindow))
+            HWND progressWindow =
+                reinterpret_cast<HWND>(lParam);
+
+            if (!progressWindow ||
+                !IsWindow(progressWindow))
             {
                 return TRUE;
             }
-            if (GetWindowThreadProcessId(progressWindow, nullptr) !=
-                GetCurrentThreadId())
+
+            if (GetWindowThreadProcessId(
+                    progressWindow,
+                    nullptr) != GetCurrentThreadId())
             {
                 return FALSE;
             }
-            return RemoveProgressWindowSubclassForTeardown(progressWindow)
+
+            return RemoveProgressWindowSubclassForTeardown(
+                       progressWindow)
                        ? TRUE
                        : FALSE;
         }
@@ -4753,11 +5120,16 @@ namespace
         if (g_removeHostSubclassMessage &&
             message == g_removeHostSubclassMessage)
         {
+            // Restore anything hidden only for the Acrylic experiment.
+            RestoreGlassDirectUiForHost(window);
+
+            // Restore Explorer's own normal presentation.
             RestoreNativePresentationForHost(window);
-            if (ShouldApplyNativeColorOverrides())
-            {
-                ResetUnifiedHostChrome(window);
-            }
+
+            // Acrylic/full-client frame is applied independently from
+            // native color overrides, so reset it unconditionally.
+            ResetUnifiedHostChrome(window);
+
             RestoreHostNativeGeometry(window);
 
             if (!DestroyProgressCirclesForHost(window))
@@ -4769,61 +5141,238 @@ namespace
             ForgetHostPresentationState(window);
 
             DWORD_PTR referenceData = 0;
+
             if (!RemoveWindowSubclass(
-                    window, OperationStatusWindowSubclassProc, subclassId) &&
+                    window,
+                    OperationStatusWindowSubclassProc,
+                    subclassId) &&
                 GetWindowSubclass(
-                    window, OperationStatusWindowSubclassProc, subclassId,
+                    window,
+                    OperationStatusWindowSubclassProc,
+                    subclassId,
                     &referenceData))
             {
-                Wh_Log(L"Presentation teardown failed to remove host "
-                       L"subclass hwnd=%p error=%lu",
-                       reinterpret_cast<void *>(window), GetLastError());
+                Wh_Log(
+                    L"Presentation teardown failed to remove host "
+                    L"subclass hwnd=%p error=%lu",
+                    reinterpret_cast<void *>(window),
+                    GetLastError());
+
                 return FALSE;
             }
 
             RemoveHostSubclassRecord(window);
+
             return TRUE;
         }
 
         if (message == g_positionCirclesMessage)
         {
-            PCWSTR reason = TakeProgressCirclePositionReason(window);
+            PCWSTR reason =
+                TakeProgressCirclePositionReason(window);
+
             if (reason)
             {
-                PositionProgressCirclesForHost(window, reason);
+                PositionProgressCirclesForHost(
+                    window,
+                    reason);
+
                 ApplyNativeDisplayRatesForHost(window);
             }
+
             return 0;
         }
 
         if (message == g_logDisplayStateMessage)
         {
             HandleDeferredDisplaySnapshot(
-                window, static_cast<unsigned long long>(wParam));
+                window,
+                static_cast<unsigned long long>(wParam));
+
             return 0;
         }
 
         if (message == WM_NCDESTROY)
         {
+            RestoreGlassDirectUiForHost(window);
+
             CancelDeferredDisplaySnapshotsForHost(window);
             ForgetHostPresentationState(window);
             ForgetHostNativeGeometry(window);
+
             if (!DestroyProgressCirclesForHost(window))
             {
-                Wh_Log(L"Presentation cleanup incomplete during host "
-                       L"destruction hwnd=%p",
-                       reinterpret_cast<void *>(window));
+                Wh_Log(
+                    L"Presentation cleanup incomplete during host "
+                    L"destruction hwnd=%p",
+                    reinterpret_cast<void *>(window));
             }
+
             RemoveHostSubclassRecord(window);
+
             if (!RemoveWindowSubclass(
-                    window, OperationStatusWindowSubclassProc, subclassId))
+                    window,
+                    OperationStatusWindowSubclassProc,
+                    subclassId))
             {
-                Wh_Log(L"Presentation cleanup failed to remove destroying "
-                       L"host subclass hwnd=%p error=%lu",
-                       reinterpret_cast<void *>(window), GetLastError());
+                Wh_Log(
+                    L"Presentation cleanup failed to remove destroying "
+                    L"host subclass hwnd=%p error=%lu",
+                    reinterpret_cast<void *>(window),
+                    GetLastError());
             }
         }
 
+        if (message == WM_PAINT &&
+            kGlassHostOnlyProbe)
+        {
+            Wh_Log(
+                L"Glass test: host buffered WM_PAINT hwnd=%p",
+                reinterpret_cast<void *>(window));
+
+            static bool preparedHost = false;
+
+            if (!preparedHost)
+            {
+                preparedHost = true;
+
+                HWND directUi = nullptr;
+
+                while ((directUi = FindWindowExW(
+                            window,
+                            directUi,
+                            L"DirectUIHWND",
+                            nullptr)) != nullptr)
+                {
+                    Wh_Log(
+                        L"Glass test: hiding DirectUIHWND hwnd=%p visible=%d",
+                        reinterpret_cast<void *>(directUi),
+                        IsWindowVisible(directUi) ? 1 : 0);
+
+                    ShowWindow(
+                        directUi,
+                        SW_HIDE);
+                }
+            }
+
+            PAINTSTRUCT paint{};
+            HDC paintDc = BeginPaint(window, &paint);
+
+            if (!paintDc)
+            {
+                return 0;
+            }
+
+            RECT client{};
+            if (!GetClientRect(window, &client))
+            {
+                EndPaint(window, &paint);
+                return 0;
+            }
+
+            GlassBufferedPaintApi *bp =
+                GetGlassBufferedPaintApi();
+
+            if (!bp)
+            {
+                Wh_Log(
+                    L"Glass test: buffered-paint API unavailable");
+
+                EndPaint(window, &paint);
+                return 0;
+            }
+
+            HRESULT initResult =
+                bp->init();
+
+            Wh_Log(
+                L"Glass test: BufferedPaintInit result=0x%08X",
+                static_cast<unsigned int>(initResult));
+
+            BP_PAINTPARAMS params{};
+            params.cbSize = sizeof(params);
+            params.dwFlags = BPPF_ERASE;
+
+            HDC bufferDc = nullptr;
+
+            HPAINTBUFFER buffer =
+                bp->begin(
+                    paintDc,
+                    &client,
+                    BPBF_TOPDOWNDIB,
+                    &params,
+                    &bufferDc);
+
+            Wh_Log(
+                L"Glass test: BeginBufferedPaint buffer=%p dc=%p",
+                reinterpret_cast<void *>(buffer),
+                reinterpret_cast<void *>(bufferDc));
+
+            if (buffer && bufferDc)
+            {
+                                HWND glassInfoWindow = nullptr;
+
+                {
+                    std::lock_guard<std::mutex> lock(g_circleMutex);
+
+                    for (CircleState const &state : g_circles)
+                    {
+                        if (state.hostWindow == window &&
+                            state.infoWindow &&
+                            IsWindow(state.infoWindow))
+                        {
+                            glassInfoWindow = state.infoWindow;
+                            break;
+                        }
+                    }
+                }
+
+                bool drewInfoPanel = false;
+
+                if (glassInfoWindow)
+                {
+                    RECT infoClient{};
+
+                    if (GetClientRect(
+                            window,
+                            &infoClient))
+                    {
+                        g_glassTransparentInfoPanelPaint = true;
+
+                        DrawInfoPanelFrame(
+                            glassInfoWindow,
+                            bufferDc,
+                            infoClient);
+
+                        g_glassTransparentInfoPanelPaint = false;
+
+                        drewInfoPanel = true;
+                    }
+                }
+
+                if (!drewInfoPanel)
+                {
+                    DrawGlassHostProgressRing(
+                        window,
+                        bufferDc);
+                }
+
+                Wh_Log(
+                    L"Glass test: full info panel drawn=%d",
+                    drewInfoPanel ? 1 : 0);
+                bp->end(
+                    buffer,
+                    TRUE);
+            }
+
+            bp->uninit();
+
+            EndPaint(
+                window,
+                &paint);
+
+            return 0;
+        }
         LRESULT result = DefSubclassProc(window, message, wParam, lParam);
         if (message == WM_SETTEXT || message == WM_SIZE ||
             message == WM_WINDOWPOSCHANGED)
@@ -5022,10 +5571,40 @@ namespace
 
     void InvalidateInfoPanelForTile(OperationTileElement *tile)
     {
-        HWND infoWindow = GetInfoPanelWindowForTile(tile);
+        HWND infoWindow = nullptr;
+        HWND hostWindow = nullptr;
+
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+
+            auto it = std::find_if(
+                g_circles.begin(),
+                g_circles.end(),
+                [tile](CircleState const &state)
+                {
+                    return state.tile == tile;
+                });
+
+            if (it != g_circles.end())
+            {
+                infoWindow = it->infoWindow;
+                hostWindow = it->hostWindow;
+            }
+        }
+
         if (infoWindow && IsWindow(infoWindow))
         {
             InvalidateRect(infoWindow, nullptr, FALSE);
+        }
+
+        if (kGlassHostOnlyProbe &&
+            hostWindow &&
+            IsWindow(hostWindow))
+        {
+            InvalidateRect(
+                hostWindow,
+                nullptr,
+                FALSE);
         }
     }
 
@@ -5050,6 +5629,18 @@ namespace
         if (!infoWindow || !IsWindow(infoWindow) ||
             !hostWindow || !IsWindow(hostWindow))
         {
+            return;
+        }
+
+        if (kGlassHostOnlyProbe)
+        {
+            if (infoWindow &&
+                IsWindow(infoWindow) &&
+                IsWindowVisible(infoWindow))
+            {
+                ShowWindow(infoWindow, SW_HIDE);
+            }
+
             return;
         }
 
@@ -6950,6 +7541,26 @@ namespace
             it->completedBytes = completedBytes;
             it->totalBytes = totalBytes;
             it->bytesValid = true;
+
+            if (totalBytes > 0)
+            {
+                long double rawPercent =
+                    static_cast<long double>(completedBytes) * 100.0L /
+                    static_cast<long double>(totalBytes);
+
+                int bytePercent =
+                    static_cast<int>(
+                        std::clamp<long double>(
+                            rawPercent,
+                            0.0L,
+                            100.0L));
+
+                Wh_Log(
+                    L"Progress bytes: percent=%d completed=%llu total=%llu",
+                    bytePercent,
+                    completedBytes,
+                    totalBytes);
+            }
             tile = it->tile;
         }
 
