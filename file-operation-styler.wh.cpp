@@ -427,17 +427,6 @@ namespace
         OperationTileElement *thisPtr);
     OperationTileElement_Destructor_t OperationTileElement_Destructor_Original;
 
-    using COperationStatusTile_Constructor_t = void(__cdecl *)(
-        COperationStatusTile *thisPtr,
-        HWND window,
-        unsigned long arg2,
-        unsigned int extendedFlags,
-        IOperationDataReader *dataReader,
-        CTileNotificationsBase *notifications,
-        HWND secondWindow);
-    COperationStatusTile_Constructor_t
-        COperationStatusTile_Constructor_Original;
-
     using COperationStatusTile_UpdateRemainingItemsAndSize_t =
         HRESULT(__cdecl *)(COperationStatusTile *thisPtr,
                            unsigned long long completedItems,
@@ -446,23 +435,6 @@ namespace
                            unsigned long long totalBytes);
     COperationStatusTile_UpdateRemainingItemsAndSize_t
         COperationStatusTile_UpdateRemainingItemsAndSize_Original;
-
-    using COperationDataProvider_ReadCurrentItem_t = HRESULT(__cdecl *)(
-        COperationDataProvider *thisPtr,
-        IShellItem **currentItem);
-    COperationDataProvider_ReadCurrentItem_t
-        COperationDataProvider_ReadCurrentItem_Original;
-
-    using COperationDataProvider_ReadProgressValues_t = HRESULT(__cdecl *)(
-        COperationDataProvider *thisPtr,
-        unsigned long long *value0,
-        unsigned long long *value1,
-        unsigned long long *value2,
-        unsigned long long *value3,
-        unsigned long long *value4,
-        unsigned long long *value5);
-    COperationDataProvider_ReadProgressValues_t
-        COperationDataProvider_ReadProgressValues_Original;
 
     using COperationDataProvider_WriteCurrentItem_t = HRESULT(__cdecl *)(
         COperationDataProvider *thisPtr,
@@ -600,12 +572,6 @@ namespace
         unsigned long long latestTotalBytes = 0;
         bool latestProgressValid = false;
 
-        unsigned long long latestReadCompletedItems = 0;
-        unsigned long long latestReadTotalItems = 0;
-        unsigned long long latestReadCompletedBytes = 0;
-        unsigned long long latestReadTotalBytes = 0;
-        bool latestReadValid = false;
-        ULONGLONG latestReadTick = 0;
 
         unsigned long long currentFileSize = 0;
         unsigned long long currentFileStartBytes = 0;
@@ -8722,88 +8688,6 @@ namespace
     }
 
 
-    void __cdecl COperationStatusTile_Constructor_Hook(
-        COperationStatusTile *thisPtr,
-        HWND window,
-        unsigned long arg2,
-        unsigned int extendedFlags,
-        IOperationDataReader *dataReader,
-        CTileNotificationsBase *notifications,
-        HWND secondWindow)
-    {
-
-
-
-        COperationStatusTile_Constructor_Original(
-            thisPtr, window, arg2, extendedFlags,
-            dataReader, notifications, secondWindow);
-    }
-
-    HRESULT __cdecl COperationDataProvider_ReadCurrentItem_Hook(
-        COperationDataProvider *thisPtr,
-        IShellItem **currentItem)
-    {
-        HRESULT result =
-            COperationDataProvider_ReadCurrentItem_Original(
-                thisPtr, currentItem);
-
-        IShellItem *item =
-            SUCCEEDED(result) && currentItem ? *currentItem : nullptr;
-
-        return result;
-    }
-
-    HRESULT __cdecl COperationDataProvider_ReadProgressValues_Hook(
-        COperationDataProvider *thisPtr,
-        unsigned long long *value0,
-        unsigned long long *value1,
-        unsigned long long *value2,
-        unsigned long long *value3,
-        unsigned long long *value4,
-        unsigned long long *value5)
-    {
-        HRESULT result =
-            COperationDataProvider_ReadProgressValues_Original(
-                thisPtr,
-                value0, value1, value2,
-                value3, value4, value5);
-
-        if (SUCCEEDED(result) &&
-            value2 && value3 && value4 && value5)
-        {
-            auto *writer = reinterpret_cast<COperationDataProvider *>(
-                reinterpret_cast<unsigned char *>(thisPtr) +
-                sizeof(void *));
-
-            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
-
-            auto binding = std::find_if(
-                g_operationDataBindings.begin(),
-                g_operationDataBindings.end(),
-                [writer](OperationDataBinding const &entry)
-                { return entry.writer == writer; });
-
-            if (binding == g_operationDataBindings.end())
-            {
-                OperationDataBinding entry{};
-                entry.writer = writer;
-                g_operationDataBindings.push_back(entry);
-                binding = std::prev(g_operationDataBindings.end());
-            }
-
-            binding->latestReadCompletedItems = *value2;
-            binding->latestReadTotalItems = *value3;
-            binding->latestReadCompletedBytes = *value4;
-            binding->latestReadTotalBytes = *value5;
-            binding->latestReadValid = true;
-            binding->latestReadTick = GetTickCount64();
-        }
-
-        constexpr unsigned long long kMissing = ~0ULL;
-
-        return result;
-    }
-
     HRESULT __cdecl COperationDataProvider_WriteCurrentItem_Hook(
         COperationDataProvider *thisPtr,
         IShellItem *currentItem)
@@ -9582,9 +9466,6 @@ namespace
         OperationTileElement_Destructor_t operationTileDestructor;
         COperationStatusTile_UpdateRemainingItemsAndSize_t
             updateRemainingItemsAndSize;
-        COperationStatusTile_Constructor_t constructor;
-        COperationDataProvider_ReadCurrentItem_t readCurrentItem;
-        COperationDataProvider_ReadProgressValues_t readProgressValues;
         COperationDataProvider_WriteCurrentItem_t writeCurrentItem;
         COperationDataProvider_WriteProgressValues_t writeProgressValues;
         COperationStatusTile_RefreshDisplayProgress_t refreshDisplayProgress;
@@ -9724,24 +9605,6 @@ namespace
                 false,
             },
             {
-                {LR"(private: __cdecl COperationStatusTile::COperationStatusTile(struct HWND__ *,unsigned long,enum FILE_OPERATION_EXTENDED_FLAGS,struct IOperationDataReader *,class CTileNotificationsBase *,struct HWND__ *))"},
-                &targets->constructor,
-                nullptr,
-                false,
-            },
-            {
-                {LR"(public: virtual long __cdecl COperationDataProvider::ReadCurrentItem(struct IShellItem **))"},
-                &targets->readCurrentItem,
-                nullptr,
-                true,
-            },
-            {
-                {LR"(public: virtual long __cdecl COperationDataProvider::ReadProgressValues(unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *))"},
-                &targets->readProgressValues,
-                nullptr,
-                true,
-            },
-            {
                 {LR"(public: virtual long __cdecl COperationDataProvider::WriteCurrentItem(struct IShellItem *))"},
                 &targets->writeCurrentItem,
                 nullptr,
@@ -9790,7 +9653,6 @@ namespace
             !targets->createTileElement || !targets->progressPositionProp ||
             !targets->getProgressHWND || !targets->onPropertyChanged ||
             !targets->operationTileDestructor ||
-            !targets->constructor ||
             !targets->writeCurrentItem ||
             !targets->writeProgressValues ||
             !targets->refreshDisplayProgress ||
@@ -9893,38 +9755,6 @@ namespace
         {
             Wh_Log(L"Skin setup failed: unable to hook "
                    L"shell32!CProgressDialog::UpdateProgress(6)");
-            return false;
-        }
-
-        if (!WindhawkUtils::SetFunctionHook(
-                targets.constructor,
-                COperationStatusTile_Constructor_Hook,
-                &COperationStatusTile_Constructor_Original))
-        {
-            Wh_Log(L"Skin setup failed: unable to hook "
-                   L"shell32!COperationStatusTile::COperationStatusTile");
-            return false;
-        }
-
-        if (targets.readCurrentItem &&
-            !WindhawkUtils::SetFunctionHook(
-                targets.readCurrentItem,
-                COperationDataProvider_ReadCurrentItem_Hook,
-                &COperationDataProvider_ReadCurrentItem_Original))
-        {
-            Wh_Log(L"Skin setup failed: unable to hook "
-                   L"shell32!COperationDataProvider::ReadCurrentItem");
-            return false;
-        }
-
-        if (targets.readProgressValues &&
-            !WindhawkUtils::SetFunctionHook(
-                targets.readProgressValues,
-                COperationDataProvider_ReadProgressValues_Hook,
-                &COperationDataProvider_ReadProgressValues_Original))
-        {
-            Wh_Log(L"Skin setup failed: unable to hook "
-                   L"shell32!COperationDataProvider::ReadProgressValues");
             return false;
         }
 
