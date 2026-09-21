@@ -47,7 +47,7 @@ Choose one of the included themes or adjust a few basic options to create your o
 
 ## Notes
 
-File Operation Styler changes the appearance of the normal file operation window only.  
+File Operation Styler changes the appearance of the normal file operation window only.
 Windows continues to handle the actual copy, move, delete, conflicts, and errors.
 
 Settings changes apply to new file-operation windows; operations already in progress may use the native Windows presentation until they complete.
@@ -138,8 +138,8 @@ Settings changes apply to new file-operation windows; operations already in prog
 #include <shlwapi.h>
 #include <windows.h>
 
-
 #include <uxtheme.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <atomic>
@@ -151,8 +151,13 @@ Settings changes apply to new file-operation windows; operations already in prog
 #include <string>
 #include <vector>
 
+struct CProgressDialog;
+struct COperationDataProvider;
+struct IOperationDataReader;
+class CTileNotificationsBase;
 struct COperationStatusTile;
 struct COperationStatusTileRateCalculator;
+struct COperationStatusTileCache;
 struct OperationTileElement;
 
 namespace DirectUI
@@ -166,6 +171,29 @@ namespace DirectUI
 
 namespace
 {
+    void FreeShellMemory(void *memory)
+    {
+        if (!memory)
+            return;
+
+        using CoTaskMemFree_t = void(WINAPI *)(LPVOID);
+
+        static CoTaskMemFree_t freeFn = []() -> CoTaskMemFree_t
+        {
+            HMODULE ole32 = GetModuleHandleW(L"ole32.dll");
+            if (!ole32)
+                ole32 = LoadLibraryW(L"ole32.dll");
+
+            return ole32
+                ? reinterpret_cast<CoTaskMemFree_t>(
+                      GetProcAddress(ole32, "CoTaskMemFree"))
+                : nullptr;
+        }();
+
+        if (freeFn)
+            freeFn(memory);
+    }
+
 
     static_assert(sizeof(void *) == 8);
     static_assert(sizeof(unsigned long) == sizeof(ULONG));
@@ -286,6 +314,7 @@ namespace
         DirectUI::Element **createdElement);
     DUIXmlParser_CreateElement_t DUIXmlParser_CreateElement_Original;
 
+
     HRESULT __cdecl DUIXmlParser_CreateElement_Hook(
         DirectUI::DUIXmlParser *parser,
         PCWSTR resourceName,
@@ -398,6 +427,17 @@ namespace
         OperationTileElement *thisPtr);
     OperationTileElement_Destructor_t OperationTileElement_Destructor_Original;
 
+    using COperationStatusTile_Constructor_t = void(__cdecl *)(
+        COperationStatusTile *thisPtr,
+        HWND window,
+        unsigned long arg2,
+        unsigned int extendedFlags,
+        IOperationDataReader *dataReader,
+        CTileNotificationsBase *notifications,
+        HWND secondWindow);
+    COperationStatusTile_Constructor_t
+        COperationStatusTile_Constructor_Original;
+
     using COperationStatusTile_UpdateRemainingItemsAndSize_t =
         HRESULT(__cdecl *)(COperationStatusTile *thisPtr,
                            unsigned long long completedItems,
@@ -407,10 +447,82 @@ namespace
     COperationStatusTile_UpdateRemainingItemsAndSize_t
         COperationStatusTile_UpdateRemainingItemsAndSize_Original;
 
+    using COperationDataProvider_ReadCurrentItem_t = HRESULT(__cdecl *)(
+        COperationDataProvider *thisPtr,
+        IShellItem **currentItem);
+    COperationDataProvider_ReadCurrentItem_t
+        COperationDataProvider_ReadCurrentItem_Original;
+
+    using COperationDataProvider_ReadProgressValues_t = HRESULT(__cdecl *)(
+        COperationDataProvider *thisPtr,
+        unsigned long long *value0,
+        unsigned long long *value1,
+        unsigned long long *value2,
+        unsigned long long *value3,
+        unsigned long long *value4,
+        unsigned long long *value5);
+    COperationDataProvider_ReadProgressValues_t
+        COperationDataProvider_ReadProgressValues_Original;
+
+    using COperationDataProvider_WriteCurrentItem_t = HRESULT(__cdecl *)(
+        COperationDataProvider *thisPtr,
+        IShellItem *currentItem);
+    COperationDataProvider_WriteCurrentItem_t
+        COperationDataProvider_WriteCurrentItem_Original;
+
+    using COperationDataProvider_WriteProgressValues_t = HRESULT(__cdecl *)(
+        COperationDataProvider *thisPtr,
+        unsigned long long value0,
+        unsigned long long value1,
+        unsigned long long value2,
+        unsigned long long value3,
+        unsigned long long value4,
+        unsigned long long value5);
+    COperationDataProvider_WriteProgressValues_t
+        COperationDataProvider_WriteProgressValues_Original;
+
+    using CProgressDialog_UpdateLocations_t = HRESULT(__cdecl *)(
+        CProgressDialog *thisPtr,
+        IShellItem *source,
+        IShellItem *destination,
+        IShellItem *currentItem);
+    CProgressDialog_UpdateLocations_t
+        CProgressDialog_UpdateLocations_Original;
+
+    using CProgressDialog_UpdateProgress6_t = HRESULT(__cdecl *)(
+        CProgressDialog *thisPtr,
+        unsigned long long value0,
+        unsigned long long value1,
+        unsigned long long value2,
+        unsigned long long value3,
+        unsigned long long value4,
+        unsigned long long value5);
+    CProgressDialog_UpdateProgress6_t
+        CProgressDialog_UpdateProgress6_Original;
+
+    using COperationStatusTile_RefreshDisplayProgress_t = void(__cdecl *)(
+        COperationStatusTile *thisPtr,
+        unsigned long long value0,
+        unsigned long long value1);
+    COperationStatusTile_RefreshDisplayProgress_t
+        COperationStatusTile_RefreshDisplayProgress_Original;
+
     using COperationStatusTile_UpdateSummary_t = HRESULT(__cdecl *)(
         COperationStatusTile *thisPtr,
         PCWSTR summary);
     COperationStatusTile_UpdateSummary_t COperationStatusTile_UpdateSummary_Original;
+
+    using COperationStatusTileCache_GetProgressValues_t = HRESULT(__cdecl *)(
+        COperationStatusTileCache *thisPtr,
+        unsigned long long *value0,
+        unsigned long long *value1,
+        unsigned long long *value2,
+        unsigned long long *value3,
+        unsigned long long *value4,
+        unsigned long long *value5);
+    COperationStatusTileCache_GetProgressValues_t
+        COperationStatusTileCache_GetProgressValues_Original;
+
 
     using COperationStatusTile_SetTileDisplayMode_t = HRESULT(__cdecl *)(
         COperationStatusTile *thisPtr,
@@ -449,6 +561,11 @@ namespace
         unsigned long long completedBytes;
         unsigned long long totalBytes;
         bool bytesValid;
+        unsigned long long currentFileSize = 0;
+        unsigned long long currentFileStartBytes = 0;
+        unsigned long long currentFileCompletedBytes = 0;
+        int currentFilePercent = 0;
+        bool currentFileProgressValid = false;
         bool displayModeKnown;
         bool expanded;
         double nativeDisplayRate = 0.0;
@@ -471,6 +588,208 @@ namespace
 
     std::mutex g_transferSummaryMutex;
     std::vector<TransferSummaryState> g_transferSummaries;
+
+    struct OperationDataBinding
+    {
+        COperationStatusTile *owner = nullptr;
+        COperationDataProvider *writer = nullptr;
+
+        unsigned long long latestCompletedItems = 0;
+        unsigned long long latestTotalItems = 0;
+        unsigned long long latestCompletedBytes = 0;
+        unsigned long long latestTotalBytes = 0;
+        bool latestProgressValid = false;
+
+        unsigned long long latestReadCompletedItems = 0;
+        unsigned long long latestReadTotalItems = 0;
+        unsigned long long latestReadCompletedBytes = 0;
+        unsigned long long latestReadTotalBytes = 0;
+        bool latestReadValid = false;
+        ULONGLONG latestReadTick = 0;
+
+        unsigned long long currentFileSize = 0;
+        unsigned long long currentFileStartBytes = 0;
+        bool currentFileValid = false;
+        int sharedSlot = -1;
+    };
+
+    std::vector<OperationDataBinding> g_operationDataBindings;
+
+    constexpr int kSharedProgressSlotCount = 16;
+    constexpr ULONGLONG kSharedProgressFreshnessMs = 5000;
+
+    struct SharedCurrentFileProgressSlot
+    {
+        volatile LONG sequence = 0;
+        volatile LONG ownerPid = 0;
+        unsigned long long writerKey = 0;
+
+        unsigned long long completedItems = 0;
+        unsigned long long totalItems = 0;
+        unsigned long long completedBytes = 0;
+        unsigned long long totalBytes = 0;
+
+        unsigned long long currentFileSize = 0;
+        unsigned long long currentFileStartBytes = 0;
+        BOOL currentFileValid = FALSE;
+
+        ULONGLONG updateTick = 0;
+    };
+
+    struct SharedCurrentFileProgressTable
+    {
+        SharedCurrentFileProgressSlot slots[kSharedProgressSlotCount];
+    };
+
+    HANDLE g_sharedProgressMapping = nullptr;
+    SharedCurrentFileProgressTable *g_sharedProgressTable = nullptr;
+
+    bool EnsureSharedProgressBridge()
+    {
+        if (g_sharedProgressTable)
+        {
+            return true;
+        }
+
+        HANDLE mapping = CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            nullptr,
+            PAGE_READWRITE,
+            0,
+            sizeof(SharedCurrentFileProgressTable),
+            L"Local\\Windhawk.FileOperationStyler.CurrentFile.v1");
+
+        if (!mapping)
+        {
+            return false;
+        }
+
+        auto *table = static_cast<SharedCurrentFileProgressTable *>(
+            MapViewOfFile(
+                mapping,
+                FILE_MAP_ALL_ACCESS,
+                0, 0,
+                sizeof(SharedCurrentFileProgressTable)));
+
+        if (!table)
+        {
+            CloseHandle(mapping);
+            return false;
+        }
+
+        g_sharedProgressMapping = mapping;
+        g_sharedProgressTable = table;
+        return true;
+    }
+
+    int EnsureSharedProgressSlot(
+        OperationDataBinding &binding)
+    {
+        if (!binding.writer || !EnsureSharedProgressBridge())
+        {
+            return -1;
+        }
+
+        DWORD pid = GetCurrentProcessId();
+        unsigned long long writerKey =
+            reinterpret_cast<unsigned long long>(binding.writer);
+
+        if (binding.sharedSlot >= 0 &&
+            binding.sharedSlot < kSharedProgressSlotCount)
+        {
+            auto &slot =
+                g_sharedProgressTable->slots[binding.sharedSlot];
+
+            if (static_cast<DWORD>(slot.ownerPid) == pid &&
+                slot.writerKey == writerKey)
+            {
+                return binding.sharedSlot;
+            }
+
+            binding.sharedSlot = -1;
+        }
+
+        ULONGLONG now = GetTickCount64();
+
+        for (int i = 0; i < kSharedProgressSlotCount; ++i)
+        {
+            auto &slot = g_sharedProgressTable->slots[i];
+
+            if (static_cast<DWORD>(slot.ownerPid) == pid &&
+                slot.writerKey == writerKey)
+            {
+                binding.sharedSlot = i;
+                return i;
+            }
+        }
+
+        for (int i = 0; i < kSharedProgressSlotCount; ++i)
+        {
+            auto &slot = g_sharedProgressTable->slots[i];
+            LONG existingPid = slot.ownerPid;
+            bool stale =
+                existingPid != 0 &&
+                now >= slot.updateTick &&
+                now - slot.updateTick > 30000;
+
+            if (existingPid == 0 || stale)
+            {
+                if (InterlockedCompareExchange(
+                        &slot.ownerPid,
+                        static_cast<LONG>(pid),
+                        existingPid) == existingPid)
+                {
+                    InterlockedIncrement(&slot.sequence);
+                    slot.writerKey = writerKey;
+                    slot.completedItems = 0;
+                    slot.totalItems = 0;
+                    slot.completedBytes = 0;
+                    slot.totalBytes = 0;
+                    slot.currentFileSize = 0;
+                    slot.currentFileStartBytes = 0;
+                    slot.currentFileValid = FALSE;
+                    slot.updateTick = now;
+                    InterlockedIncrement(&slot.sequence);
+
+                    binding.sharedSlot = i;
+
+                    return i;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    void PublishSharedProgress(
+        OperationDataBinding &binding)
+    {
+        int index = EnsureSharedProgressSlot(binding);
+
+        if (index < 0)
+        {
+            return;
+        }
+
+        auto &slot = g_sharedProgressTable->slots[index];
+
+        InterlockedIncrement(&slot.sequence);
+
+        slot.completedItems = binding.latestCompletedItems;
+        slot.totalItems = binding.latestTotalItems;
+        slot.completedBytes = binding.latestCompletedBytes;
+        slot.totalBytes = binding.latestTotalBytes;
+        slot.currentFileSize = binding.currentFileSize;
+        slot.currentFileStartBytes =
+            binding.currentFileStartBytes;
+        slot.currentFileValid =
+            binding.currentFileValid ? TRUE : FALSE;
+        slot.updateTick = GetTickCount64();
+
+        MemoryBarrier();
+        InterlockedIncrement(&slot.sequence);
+    }
+
     thread_local COperationStatusTile *g_nativeRateOwnerHint = nullptr;
 
     struct ThemePalette
@@ -1057,7 +1376,6 @@ namespace
         type.circleLabelSize = type.bodySize;
         type.footerSize = type.bodySize;
         type.graphValueSize = std::max(type.bodySize - 1, 7);
-
     }
 
 #define kBackgroundColor (g_settings.theme.background)
@@ -1107,7 +1425,7 @@ namespace
     {
         static std::once_flag initializeOnce;
         std::call_once(initializeOnce, []
-        {
+                       {
             HMODULE module = GetModuleHandleW(L"dwmapi.dll");
             bool owned = false;
             if (!module)
@@ -1127,8 +1445,7 @@ namespace
             if (owned)
             {
                 g_ownedDwmApiModule = module;
-            }
-        });
+            } });
         return g_dwmSetWindowAttribute;
     }
 
@@ -1591,7 +1908,6 @@ namespace
         return nullptr;
     }
 
-
     struct WindowLookupContext
     {
         unsigned long long eventId;
@@ -1680,7 +1996,7 @@ namespace
     size_t GetRegisteredTileCountForHost(HWND hostWindow);
     void MarkHostForMeasuredMultiRate(HWND hostWindow)
     {
-if (!hostWindow)
+        if (!hostWindow)
         {
             return;
         }
@@ -1740,7 +2056,6 @@ if (!hostWindow)
         LPARAM lParam,
         UINT_PTR subclassId,
         DWORD_PTR referenceData);
-
 
     int GetCircleProgress(HWND circleWindow)
     {
@@ -2004,6 +2319,8 @@ if (!hostWindow)
     struct InfoPanelSnapshot
     {
         int percent = 0;
+        int currentFilePercent = 0;
+        bool currentFileProgressValid = false;
         unsigned long long completedBytes = 0;
         unsigned long long totalBytes = 0;
         unsigned long long completedItems = 0;
@@ -2086,6 +2403,9 @@ if (!hostWindow)
         snapshot->completedItems = stateCopy.completedItems;
         snapshot->totalItems = stateCopy.totalItems;
         snapshot->bytesValid = stateCopy.bytesValid;
+        snapshot->currentFilePercent = stateCopy.currentFilePercent;
+        snapshot->currentFileProgressValid =
+            stateCopy.currentFileProgressValid;
         snapshot->itemsValid = stateCopy.itemsValid;
         bool useMeasuredRate =
             stateCopy.preferMeasuredRate &&
@@ -2153,6 +2473,7 @@ if (!hostWindow)
                 stateCopy.operationTileRoot, stateCopy.tileHeaderRoot,
                 L"eltItemName", false);
             snapshot->currentItemName = ReadDirectUiText(currentItem);
+
         }
         return true;
     }
@@ -2797,7 +3118,6 @@ if (!hostWindow)
             drawInlineSegment(timeText, &primaryBrush, speedY, &speedX);
         }
 
-
         wchar_t remainingSize[64]{};
         wchar_t itemsValue[128]{};
         unsigned long long remainingItems = 0;
@@ -2843,7 +3163,6 @@ if (!hostWindow)
             drawInlineSegment(itemsValue, &primaryBrush, itemsY, &itemsX);
         }
 
-
         if (elements.showProgressBar)
         {
             Gdiplus::REAL progressTop = static_cast<Gdiplus::REAL>(
@@ -2865,7 +3184,11 @@ if (!hostWindow)
             Gdiplus::REAL completedWidth =
                 progressWidth *
                 static_cast<Gdiplus::REAL>(
-                    std::clamp(snapshot.percent, 0, 100)) /
+                    std::clamp(
+                        snapshot.currentFileProgressValid
+                            ? snapshot.currentFilePercent
+                            : snapshot.percent,
+                        0, 100)) /
                 100.0f;
             if (completedWidth > 0.0f)
             {
@@ -2876,16 +3199,15 @@ if (!hostWindow)
             }
         }
 
-
         // The visible control is deliberately minimal like Explorer's native
         // pause/resume affordance. Its click still invokes the live native
         // DirectUI action; only presentation is custom.
         RECT pauseRect{};
         GetInfoPanelPauseRect(infoWindow, &pauseRect);
         Gdiplus::Pen actionPen(Gdiplus::Color(
-            255, GetRValue(theme.actionText), GetGValue(theme.actionText),
-            GetBValue(theme.actionText)),
-            static_cast<Gdiplus::REAL>(ScaleForDpi(2, dpi)));
+                                   255, GetRValue(theme.actionText), GetGValue(theme.actionText),
+                                   GetBValue(theme.actionText)),
+                               static_cast<Gdiplus::REAL>(ScaleForDpi(2, dpi)));
         Gdiplus::REAL actionCenterX =
             static_cast<Gdiplus::REAL>(pauseRect.left + pauseRect.right) /
             2.0f;
@@ -2933,10 +3255,12 @@ if (!hostWindow)
             GetInfoPanelCancelRect(infoWindow, &cancelRect);
             Gdiplus::REAL cancelCenterX =
                 static_cast<Gdiplus::REAL>(
-                    cancelRect.left + cancelRect.right) / 2.0f;
+                    cancelRect.left + cancelRect.right) /
+                2.0f;
             Gdiplus::REAL cancelCenterY =
                 static_cast<Gdiplus::REAL>(
-                    cancelRect.top + cancelRect.bottom) / 2.0f;
+                    cancelRect.top + cancelRect.bottom) /
+                2.0f;
             Gdiplus::REAL cancelHalf =
                 static_cast<Gdiplus::REAL>(ScaleForDpi(5, dpi));
             graphics.DrawLine(
@@ -3075,9 +3399,9 @@ if (!hostWindow)
                 theme.graphFillAlpha, GetRValue(theme.graphFill),
                 GetGValue(theme.graphFill), GetBValue(theme.graphFill)));
             Gdiplus::Pen chartLine(Gdiplus::Color(
-                255, GetRValue(theme.graphLine),
-                GetGValue(theme.graphLine), GetBValue(theme.graphLine)),
-                1.5f);
+                                       255, GetRValue(theme.graphLine),
+                                       GetGValue(theme.graphLine), GetBValue(theme.graphLine)),
+                                   1.5f);
             graphics.FillPolygon(&chartFill, fillPoints.data(),
                                  static_cast<INT>(fillPoints.size()));
             graphics.DrawLines(&chartLine, linePoints.data(),
@@ -3100,10 +3424,10 @@ if (!hostWindow)
                     static_cast<Gdiplus::REAL>(chartHeight - 2);
 
             Gdiplus::Pen referencePen(Gdiplus::Color(
-                theme.graphReferenceAlpha, GetRValue(theme.secondaryText),
-                GetGValue(theme.secondaryText),
-                GetBValue(theme.secondaryText)),
-                1.0f);
+                                          theme.graphReferenceAlpha, GetRValue(theme.secondaryText),
+                                          GetGValue(theme.secondaryText),
+                                          GetBValue(theme.secondaryText)),
+                                      1.0f);
             graphics.DrawLine(&referencePen, 0.0f, referenceY,
                               static_cast<Gdiplus::REAL>(chartWidth),
                               referenceY);
@@ -3293,7 +3617,6 @@ if (!hostWindow)
         pauseRect->bottom = std::min<LONG>(
             pauseRect->top + controlSize, clientRect.bottom);
     }
-
 
     struct ChildWindowClassLookup
     {
@@ -3599,8 +3922,6 @@ if (!hostWindow)
         return DefWindowProcW(window, message, wParam, lParam);
     }
 
-
-
     OperationTileElement *GetFooterOverlayTile(HWND footerWindow)
     {
         return reinterpret_cast<OperationTileElement *>(
@@ -3759,10 +4080,10 @@ if (!hostWindow)
         Gdiplus::REAL rise =
             static_cast<Gdiplus::REAL>(ScaleForDpi(3, dpi));
         Gdiplus::Pen chevronPen(Gdiplus::Color(
-            255, GetRValue(theme.secondaryText),
-            GetGValue(theme.secondaryText),
-            GetBValue(theme.secondaryText)),
-            1.0f);
+                                    255, GetRValue(theme.secondaryText),
+                                    GetGValue(theme.secondaryText),
+                                    GetBValue(theme.secondaryText)),
+                                1.0f);
 
         if (snapshot.expanded)
         {
@@ -3809,9 +4130,10 @@ if (!hostWindow)
                 GetGValue(theme.actionSurface),
                 GetBValue(theme.actionSurface)));
             Gdiplus::Pen buttonBorder(Gdiplus::Color(
-                255, GetRValue(theme.actionBorder),
-                GetGValue(theme.actionBorder),
-                GetBValue(theme.actionBorder)), 1.0f);
+                                          255, GetRValue(theme.actionBorder),
+                                          GetGValue(theme.actionBorder),
+                                          GetBValue(theme.actionBorder)),
+                                      1.0f);
             graphics.FillRectangle(&buttonBrush, buttonBounds);
             graphics.DrawRectangle(&buttonBorder, buttonBounds);
             Gdiplus::StringFormat centered;
@@ -3859,9 +4181,9 @@ if (!hostWindow)
     }
 
     LRESULT CALLBACK FooterOverlayWindowProc(HWND window,
-                                              UINT message,
-                                              WPARAM wParam,
-                                              LPARAM lParam)
+                                             UINT message,
+                                             WPARAM wParam,
+                                             LPARAM lParam)
     {
         if (g_removeHostSubclassMessage &&
             message == g_removeHostSubclassMessage)
@@ -4600,6 +4922,7 @@ if (!hostWindow)
 
     void RestoreGlassDirectUiForHost(HWND hostWindow);
 
+
     void HideCustomPresentationForHost(HWND hostWindow)
     {
         // Special Explorer states must temporarily leave the
@@ -5328,7 +5651,7 @@ if (!hostWindow)
 
             if (buffer && bufferDc)
             {
-                                HWND glassInfoWindow = nullptr;
+                HWND glassInfoWindow = nullptr;
 
                 {
                     std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -5432,7 +5755,6 @@ if (!hostWindow)
                             ScaleForDpi(kRequestedTileWidth, dpi) +
                             nonClientWidth;
                     }
-
                 }
             }
         }
@@ -5575,7 +5897,6 @@ if (!hostWindow)
         }
         return false;
     }
-
 
     HWND GetInfoPanelWindowForTile(OperationTileElement *tile)
     {
@@ -5773,7 +6094,6 @@ if (!hostWindow)
             {
                 InvalidateRect(infoWindow, nullptr, FALSE);
             }
-
         }
     }
 
@@ -6405,7 +6725,6 @@ if (!hostWindow)
         *canonicalOwner = nullptr;
         return false;
     }
-
 
     void ScheduleDeferredDisplaySnapshot(COperationStatusTile *owner,
                                          unsigned long long transitionId,
@@ -7052,7 +7371,6 @@ if (!hostWindow)
         return true;
     }
 
-
     bool IsSingleNormalProgressTileForHost(OperationTileElement *tile,
                                            HWND hostWindow)
     {
@@ -7320,7 +7638,6 @@ if (!hostWindow)
         return geometryApplied && infoVisible;
     }
 
-
     void InitializeRegisteredDisplayMode(COperationStatusTile *owner)
     {
         TransferSummaryState state{};
@@ -7453,6 +7770,121 @@ if (!hostWindow)
                 return;
             }
 
+            if (EnsureSharedProgressBridge())
+            {
+                ULONGLONG readNow = GetTickCount64();
+                bool foundSharedCurrentFile = false;
+                unsigned long long bestByteDistance = ~0ULL;
+                unsigned long long bestFileSize = 0;
+                unsigned long long bestFileStartBytes = 0;
+
+                for (int sharedIndex = 0;
+                     sharedIndex < kSharedProgressSlotCount;
+                     ++sharedIndex)
+                {
+                    auto &shared =
+                        g_sharedProgressTable->slots[sharedIndex];
+
+                    LONG sequenceBefore = shared.sequence;
+
+                    if ((sequenceBefore & 1) != 0)
+                    {
+                        continue;
+                    }
+
+                    MemoryBarrier();
+
+                    unsigned long long sharedCompletedItems =
+                        shared.completedItems;
+                    unsigned long long sharedTotalItems =
+                        shared.totalItems;
+                    unsigned long long sharedCompletedBytes =
+                        shared.completedBytes;
+                    unsigned long long sharedTotalBytes =
+                        shared.totalBytes;
+                    unsigned long long sharedFileSize =
+                        shared.currentFileSize;
+                    unsigned long long sharedFileStartBytes =
+                        shared.currentFileStartBytes;
+                    BOOL sharedFileValid = shared.currentFileValid;
+                    ULONGLONG sharedTick = shared.updateTick;
+
+                    MemoryBarrier();
+
+                    LONG sequenceAfter = shared.sequence;
+
+                    if (sequenceBefore != sequenceAfter ||
+                        (sequenceAfter & 1) != 0)
+                    {
+                        continue;
+                    }
+
+                    if (!sharedFileValid ||
+                        sharedFileSize == 0 ||
+                        sharedTotalItems != totalItems ||
+                        sharedTotalBytes != totalBytes ||
+                        readNow < sharedTick ||
+                        readNow - sharedTick >
+                            kSharedProgressFreshnessMs)
+                    {
+                        continue;
+                    }
+
+                    unsigned long long byteDistance =
+                        sharedCompletedBytes >= completedBytes
+                            ? sharedCompletedBytes - completedBytes
+                            : completedBytes - sharedCompletedBytes;
+
+                    if (!foundSharedCurrentFile ||
+                        byteDistance < bestByteDistance)
+                    {
+                        foundSharedCurrentFile = true;
+                        bestByteDistance = byteDistance;
+                        bestFileSize = sharedFileSize;
+                        bestFileStartBytes =
+                            sharedFileStartBytes;
+                    }
+                }
+
+                if (foundSharedCurrentFile)
+                {
+                    it->currentFileSize = bestFileSize;
+                    it->currentFileStartBytes =
+                        bestFileStartBytes;
+                    it->currentFileProgressValid = true;
+
+                    unsigned long long copied = 0;
+
+                    if (completedBytes >=
+                        it->currentFileStartBytes)
+                    {
+                        copied =
+                            completedBytes -
+                            it->currentFileStartBytes;
+                    }
+
+                    copied = std::min(
+                        copied,
+                        it->currentFileSize);
+
+                    it->currentFileCompletedBytes = copied;
+
+                    long double currentRawPercent =
+                        static_cast<long double>(copied) *
+                        100.0L /
+                        static_cast<long double>(
+                            it->currentFileSize);
+
+                    it->currentFilePercent =
+                        static_cast<int>(
+                            std::clamp<long double>(
+                                currentRawPercent,
+                                0.0L,
+                                100.0L));
+
+                }
+            }
+
             bool deleteLike = it->deleteLikeKnown && it->deleteLike;
 
             if (!it->measuredSampleInitialized)
@@ -7573,11 +8005,6 @@ if (!hostWindow)
                             0.0L,
                             100.0L));
 
-                Wh_Log(
-                    L"Progress bytes: percent=%d completed=%llu total=%llu",
-                    bytePercent,
-                    completedBytes,
-                    totalBytes);
             }
             tile = it->tile;
         }
@@ -7716,7 +8143,8 @@ if (!hostWindow)
             if (progressSubclassNeeded)
             {
                 if (!InstallAndTrackProgressWindowSubclass(
-                        tile, progressWindow) && eventId)
+                        tile, progressWindow) &&
+                    eventId)
                 {
                     Wh_Log(
                         L"eventId=%llu circle progress subclass install/track "
@@ -7871,6 +8299,7 @@ if (!hostWindow)
             OperationTileElement_GetProgressHWND_Original(tile);
         NativeProgressSnapshot progress =
             ReadNativeProgress(progressWindow, fallbackPercent);
+
         EnsureProgressCircle(tile, 0, progress);
         RefreshTransferSummaryForTile(tile);
         InvalidateInfoPanelForTile(tile);
@@ -8292,6 +8721,521 @@ if (!hostWindow)
         return result;
     }
 
+
+    void __cdecl COperationStatusTile_Constructor_Hook(
+        COperationStatusTile *thisPtr,
+        HWND window,
+        unsigned long arg2,
+        unsigned int extendedFlags,
+        IOperationDataReader *dataReader,
+        CTileNotificationsBase *notifications,
+        HWND secondWindow)
+    {
+
+
+
+        COperationStatusTile_Constructor_Original(
+            thisPtr, window, arg2, extendedFlags,
+            dataReader, notifications, secondWindow);
+    }
+
+    HRESULT __cdecl COperationDataProvider_ReadCurrentItem_Hook(
+        COperationDataProvider *thisPtr,
+        IShellItem **currentItem)
+    {
+        HRESULT result =
+            COperationDataProvider_ReadCurrentItem_Original(
+                thisPtr, currentItem);
+
+        IShellItem *item =
+            SUCCEEDED(result) && currentItem ? *currentItem : nullptr;
+
+        return result;
+    }
+
+    HRESULT __cdecl COperationDataProvider_ReadProgressValues_Hook(
+        COperationDataProvider *thisPtr,
+        unsigned long long *value0,
+        unsigned long long *value1,
+        unsigned long long *value2,
+        unsigned long long *value3,
+        unsigned long long *value4,
+        unsigned long long *value5)
+    {
+        HRESULT result =
+            COperationDataProvider_ReadProgressValues_Original(
+                thisPtr,
+                value0, value1, value2,
+                value3, value4, value5);
+
+        if (SUCCEEDED(result) &&
+            value2 && value3 && value4 && value5)
+        {
+            auto *writer = reinterpret_cast<COperationDataProvider *>(
+                reinterpret_cast<unsigned char *>(thisPtr) +
+                sizeof(void *));
+
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+
+            auto binding = std::find_if(
+                g_operationDataBindings.begin(),
+                g_operationDataBindings.end(),
+                [writer](OperationDataBinding const &entry)
+                { return entry.writer == writer; });
+
+            if (binding == g_operationDataBindings.end())
+            {
+                OperationDataBinding entry{};
+                entry.writer = writer;
+                g_operationDataBindings.push_back(entry);
+                binding = std::prev(g_operationDataBindings.end());
+            }
+
+            binding->latestReadCompletedItems = *value2;
+            binding->latestReadTotalItems = *value3;
+            binding->latestReadCompletedBytes = *value4;
+            binding->latestReadTotalBytes = *value5;
+            binding->latestReadValid = true;
+            binding->latestReadTick = GetTickCount64();
+        }
+
+        constexpr unsigned long long kMissing = ~0ULL;
+
+        return result;
+    }
+
+    HRESULT __cdecl COperationDataProvider_WriteCurrentItem_Hook(
+        COperationDataProvider *thisPtr,
+        IShellItem *currentItem)
+    {
+        if (currentItem)
+        {
+            currentItem->AddRef();
+        }
+
+        HRESULT result =
+            COperationDataProvider_WriteCurrentItem_Original(
+                thisPtr, currentItem);
+
+        if (!g_unloading.load(std::memory_order_acquire))
+        {
+            PWSTR filePath = nullptr;
+            PWSTR displayName = nullptr;
+
+            HRESULT pathHr = currentItem
+                ? currentItem->GetDisplayName(
+                      SIGDN_FILESYSPATH, &filePath)
+                : E_POINTER;
+
+            HRESULT nameHr = currentItem
+                ? currentItem->GetDisplayName(
+                      SIGDN_NORMALDISPLAY, &displayName)
+                : E_POINTER;
+
+            unsigned long long fileSize = 0;
+            BOOL fileExists = FALSE;
+
+            if (SUCCEEDED(pathHr) && filePath)
+            {
+                WIN32_FILE_ATTRIBUTE_DATA data{};
+                fileExists = GetFileAttributesExW(
+                    filePath, GetFileExInfoStandard, &data);
+
+                if (fileExists &&
+                    !(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                {
+                    fileSize =
+                        (static_cast<unsigned long long>(
+                             data.nFileSizeHigh) << 32) |
+                        static_cast<unsigned long long>(
+                            data.nFileSizeLow);
+                }
+            }
+
+            COperationStatusTile *boundOwner = nullptr;
+            OperationTileElement *boundTile = nullptr;
+
+            {
+                std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+
+                auto binding = std::find_if(
+                    g_operationDataBindings.begin(),
+                    g_operationDataBindings.end(),
+                    [thisPtr](OperationDataBinding const &entry)
+                    { return entry.writer == thisPtr; });
+
+                if (binding == g_operationDataBindings.end())
+                {
+                    OperationDataBinding entry{};
+                    entry.writer = thisPtr;
+                    g_operationDataBindings.push_back(entry);
+                    binding = std::prev(g_operationDataBindings.end());
+                }
+
+                unsigned long long baseline = 0;
+
+                if (binding->currentFileValid)
+                {
+                    // Sequential normal copy/move: the next file begins
+                    // exactly where the previous file ended. This avoids
+                    // losing the first chunk when WriteCurrentItem arrives
+                    // slightly after aggregate byte progress has advanced.
+                    baseline =
+                        binding->currentFileStartBytes +
+                        binding->currentFileSize;
+                }
+                else if (binding->latestProgressValid)
+                {
+                    baseline = binding->latestCompletedBytes;
+                }
+
+                binding->currentFileStartBytes = baseline;
+                binding->currentFileSize = fileSize;
+                binding->currentFileValid = fileSize > 0;
+                PublishSharedProgress(*binding);
+
+                boundOwner = binding->owner;
+
+                if (boundOwner)
+                {
+                    auto state = std::find_if(
+                        g_transferSummaries.begin(),
+                        g_transferSummaries.end(),
+                        [boundOwner](TransferSummaryState const &entry)
+                        { return entry.owner == boundOwner; });
+
+                    if (state != g_transferSummaries.end())
+                    {
+                        state->currentFileSize = fileSize;
+                        state->currentFileStartBytes = baseline;
+                        state->currentFileCompletedBytes = 0;
+                        state->currentFilePercent = 0;
+                        state->currentFileProgressValid = fileSize > 0;
+                        boundTile = state->tile;
+                    }
+                }
+
+            }
+
+            if (boundTile)
+            {
+                InvalidateInfoPanelForTile(boundTile);
+            }
+
+            if (filePath)
+            {
+                FreeShellMemory(filePath);
+            }
+
+            if (displayName)
+            {
+                FreeShellMemory(displayName);
+            }
+        }
+
+        if (currentItem)
+        {
+            currentItem->Release();
+        }
+
+        return result;
+    }
+
+    HRESULT __cdecl COperationDataProvider_WriteProgressValues_Hook(
+        COperationDataProvider *thisPtr,
+        unsigned long long value0,
+        unsigned long long value1,
+        unsigned long long value2,
+        unsigned long long value3,
+        unsigned long long value4,
+        unsigned long long value5)
+    {
+        static thread_local COperationDataProvider *lastThis = nullptr;
+        static thread_local unsigned long long last[6]{};
+        static thread_local bool initialized = false;
+
+        if (!g_unloading.load(std::memory_order_acquire))
+        {
+            bool changed =
+                !initialized ||
+                lastThis != thisPtr ||
+                last[0] != value0 ||
+                last[1] != value1 ||
+                last[2] != value2 ||
+                last[3] != value3 ||
+                last[4] != value4 ||
+                last[5] != value5;
+
+            if (changed)
+            {
+
+                lastThis = thisPtr;
+                last[0] = value0;
+                last[1] = value1;
+                last[2] = value2;
+                last[3] = value3;
+                last[4] = value4;
+                last[5] = value5;
+                initialized = true;
+            }
+        }
+
+        OperationTileElement *currentFileTile = nullptr;
+
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+
+            auto binding = std::find_if(
+                g_operationDataBindings.begin(),
+                g_operationDataBindings.end(),
+                [thisPtr](OperationDataBinding const &entry)
+                { return entry.writer == thisPtr; });
+
+            if (binding == g_operationDataBindings.end())
+            {
+                OperationDataBinding entry{};
+                entry.writer = thisPtr;
+                g_operationDataBindings.push_back(entry);
+                binding = std::prev(g_operationDataBindings.end());
+            }
+
+            binding->latestCompletedItems = value2;
+            binding->latestTotalItems = value3;
+            binding->latestCompletedBytes = value4;
+            binding->latestTotalBytes = value5;
+            binding->latestProgressValid = true;
+            PublishSharedProgress(*binding);
+
+            if (binding->owner &&
+                binding->currentFileValid &&
+                binding->currentFileSize > 0 &&
+                value4 >= binding->currentFileStartBytes)
+            {
+                auto state = std::find_if(
+                    g_transferSummaries.begin(),
+                    g_transferSummaries.end(),
+                    [binding](TransferSummaryState const &entry)
+                    { return entry.owner == binding->owner; });
+
+                if (state != g_transferSummaries.end())
+                {
+                    unsigned long long copied =
+                        value4 - binding->currentFileStartBytes;
+
+                    copied = std::min(
+                        copied, binding->currentFileSize);
+
+                    state->currentFileSize =
+                        binding->currentFileSize;
+                    state->currentFileStartBytes =
+                        binding->currentFileStartBytes;
+                    state->currentFileCompletedBytes = copied;
+                    state->currentFileProgressValid = true;
+
+                    long double rawPercent =
+                        static_cast<long double>(copied) * 100.0L /
+                        static_cast<long double>(
+                            binding->currentFileSize);
+
+                    state->currentFilePercent =
+                        static_cast<int>(
+                            std::clamp<long double>(
+                                rawPercent, 0.0L, 100.0L));
+
+                    currentFileTile = state->tile;
+                }
+            }
+        }
+
+        if (currentFileTile)
+        {
+            InvalidateInfoPanelForTile(currentFileTile);
+        }
+
+        return COperationDataProvider_WriteProgressValues_Original(
+            thisPtr,
+            value0, value1, value2,
+            value3, value4, value5);
+    }
+
+    HRESULT __cdecl CProgressDialog_UpdateLocations_Hook(
+        CProgressDialog *thisPtr,
+        IShellItem *source,
+        IShellItem *destination,
+        IShellItem *currentItem)
+    {
+        if (currentItem)
+        {
+            currentItem->AddRef();
+        }
+
+        HRESULT result = CProgressDialog_UpdateLocations_Original(
+            thisPtr, source, destination, currentItem);
+
+        if (!g_unloading.load(std::memory_order_acquire))
+        {
+            PWSTR currentPath = nullptr;
+            PWSTR currentName = nullptr;
+
+            HRESULT pathHr = currentItem
+                ? currentItem->GetDisplayName(
+                      SIGDN_FILESYSPATH, &currentPath)
+                : E_POINTER;
+
+            HRESULT nameHr = currentItem
+                ? currentItem->GetDisplayName(
+                      SIGDN_NORMALDISPLAY, &currentName)
+                : E_POINTER;
+
+            Wh_Log(
+                L"PD_LOCATION this=%p current=%p path='%s' name='%s' pathHr=0x%08X result=0x%08X",
+                reinterpret_cast<void *>(thisPtr),
+                reinterpret_cast<void *>(currentItem),
+                SUCCEEDED(pathHr) && currentPath ? currentPath : L"",
+                SUCCEEDED(nameHr) && currentName ? currentName : L"",
+                static_cast<unsigned int>(pathHr),
+                static_cast<unsigned int>(result));
+
+            if (currentPath)
+            {
+                FreeShellMemory(currentPath);
+            }
+
+            if (currentName)
+            {
+                FreeShellMemory(currentName);
+            }
+        }
+
+        if (currentItem)
+        {
+            currentItem->Release();
+        }
+
+        return result;
+    }
+
+    HRESULT __cdecl CProgressDialog_UpdateProgress6_Hook(
+        CProgressDialog *thisPtr,
+        unsigned long long value0,
+        unsigned long long value1,
+        unsigned long long value2,
+        unsigned long long value3,
+        unsigned long long value4,
+        unsigned long long value5)
+    {
+        static thread_local CProgressDialog *lastThis = nullptr;
+        static thread_local unsigned long long last[6]{};
+        static thread_local bool initialized = false;
+
+        if (!g_unloading.load(std::memory_order_acquire))
+        {
+            bool changed =
+                !initialized ||
+                lastThis != thisPtr ||
+                last[0] != value0 ||
+                last[1] != value1 ||
+                last[2] != value2 ||
+                last[3] != value3 ||
+                last[4] != value4 ||
+                last[5] != value5;
+
+            if (changed)
+            {
+                Wh_Log(
+                    L"PD_PROGRESS this=%p V0=%llu V1=%llu V2=%llu V3=%llu V4=%llu V5=%llu",
+                    reinterpret_cast<void *>(thisPtr),
+                    value0, value1, value2,
+                    value3, value4, value5);
+
+                lastThis = thisPtr;
+                last[0] = value0;
+                last[1] = value1;
+                last[2] = value2;
+                last[3] = value3;
+                last[4] = value4;
+                last[5] = value5;
+                initialized = true;
+            }
+        }
+
+        return CProgressDialog_UpdateProgress6_Original(
+            thisPtr,
+            value0, value1, value2,
+            value3, value4, value5);
+    }
+
+    void __cdecl COperationStatusTile_RefreshDisplayProgress_Hook(
+        COperationStatusTile *thisPtr,
+        unsigned long long value0,
+        unsigned long long value1)
+    {
+        static thread_local bool initialized = false;
+        static thread_local unsigned long long last0 = 0;
+        static thread_local unsigned long long last1 = 0;
+
+        if (!g_unloading.load(std::memory_order_acquire) &&
+            (!initialized || value0 != last0 || value1 != last1))
+        {
+
+            last0 = value0;
+            last1 = value1;
+            initialized = true;
+        }
+
+        COperationStatusTile_RefreshDisplayProgress_Original(
+            thisPtr, value0, value1);
+    }
+
+    HRESULT __cdecl COperationStatusTileCache_GetProgressValues_Hook(
+        COperationStatusTileCache *thisPtr,
+        unsigned long long *value0,
+        unsigned long long *value1,
+        unsigned long long *value2,
+        unsigned long long *value3,
+        unsigned long long *value4,
+        unsigned long long *value5)
+    {
+        HRESULT result =
+            COperationStatusTileCache_GetProgressValues_Original(
+                thisPtr, value0, value1, value2,
+                value3, value4, value5);
+
+        if (!g_unloading.load(std::memory_order_acquire) &&
+            SUCCEEDED(result))
+        {
+            unsigned long long p0 = value0 ? *value0 : ~0ULL;
+            unsigned long long p1 = value1 ? *value1 : ~0ULL;
+            unsigned long long p2 = value2 ? *value2 : ~0ULL;
+            unsigned long long p3 = value3 ? *value3 : ~0ULL;
+            unsigned long long p4 = value4 ? *value4 : ~0ULL;
+            unsigned long long p5 = value5 ? *value5 : ~0ULL;
+
+            static thread_local bool initialized = false;
+            static thread_local unsigned long long last[6]{};
+
+            bool changed =
+                !initialized ||
+                last[0] != p0 || last[1] != p1 ||
+                last[2] != p2 || last[3] != p3 ||
+                last[4] != p4 || last[5] != p5;
+
+            if (changed)
+            {
+
+                last[0] = p0;
+                last[1] = p1;
+                last[2] = p2;
+                last[3] = p3;
+                last[4] = p4;
+                last[5] = p5;
+                initialized = true;
+            }
+        }
+
+        return result;
+    }
+
     HRESULT __cdecl COperationStatusTile_UpdateSummary_Hook(
         COperationStatusTile *thisPtr,
         PCWSTR summary)
@@ -8638,6 +9582,15 @@ if (!hostWindow)
         OperationTileElement_Destructor_t operationTileDestructor;
         COperationStatusTile_UpdateRemainingItemsAndSize_t
             updateRemainingItemsAndSize;
+        COperationStatusTile_Constructor_t constructor;
+        COperationDataProvider_ReadCurrentItem_t readCurrentItem;
+        COperationDataProvider_ReadProgressValues_t readProgressValues;
+        COperationDataProvider_WriteCurrentItem_t writeCurrentItem;
+        COperationDataProvider_WriteProgressValues_t writeProgressValues;
+        COperationStatusTile_RefreshDisplayProgress_t refreshDisplayProgress;
+        CProgressDialog_UpdateLocations_t updateLocations;
+        CProgressDialog_UpdateProgress6_t updateProgress6;
+        COperationStatusTileCache_GetProgressValues_t getProgressValues;
         COperationStatusTile_UpdateSummary_t updateSummary;
         COperationStatusTile_SetTileDisplayMode_t setTileDisplayMode;
         COperationStatusTileRateCalculator_CalculateRate_t calculateRate;
@@ -8753,8 +9706,62 @@ if (!hostWindow)
                 false,
             },
             {
+                {LR"(private: void __cdecl COperationStatusTile::_RefreshDisplayProgress(unsigned __int64,unsigned __int64))"},
+                &targets->refreshDisplayProgress,
+                nullptr,
+                false,
+            },
+            {
+                {LR"(public: virtual long __cdecl CProgressDialog::UpdateLocations(struct IShellItem *,struct IShellItem *,struct IShellItem *))"},
+                &targets->updateLocations,
+                nullptr,
+                false,
+            },
+            {
+                {LR"(public: virtual long __cdecl CProgressDialog::UpdateProgress(unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64))"},
+                &targets->updateProgress6,
+                nullptr,
+                false,
+            },
+            {
+                {LR"(private: __cdecl COperationStatusTile::COperationStatusTile(struct HWND__ *,unsigned long,enum FILE_OPERATION_EXTENDED_FLAGS,struct IOperationDataReader *,class CTileNotificationsBase *,struct HWND__ *))"},
+                &targets->constructor,
+                nullptr,
+                false,
+            },
+            {
+                {LR"(public: virtual long __cdecl COperationDataProvider::ReadCurrentItem(struct IShellItem **))"},
+                &targets->readCurrentItem,
+                nullptr,
+                true,
+            },
+            {
+                {LR"(public: virtual long __cdecl COperationDataProvider::ReadProgressValues(unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *))"},
+                &targets->readProgressValues,
+                nullptr,
+                true,
+            },
+            {
+                {LR"(public: virtual long __cdecl COperationDataProvider::WriteCurrentItem(struct IShellItem *))"},
+                &targets->writeCurrentItem,
+                nullptr,
+                false,
+            },
+            {
+                {LR"(public: virtual long __cdecl COperationDataProvider::WriteProgressValues(unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64))"},
+                &targets->writeProgressValues,
+                nullptr,
+                false,
+            },
+            {
                 {LR"(private: long __cdecl COperationStatusTile::_UpdateRemainingItemsAndSize(unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64))"},
                 &targets->updateRemainingItemsAndSize,
+                nullptr,
+                false,
+            },
+            {
+                {LR"(public: long __cdecl COperationStatusTileCache::GetProgressValues(unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *))"},
+                &targets->getProgressValues,
                 nullptr,
                 false,
             },
@@ -8783,6 +9790,13 @@ if (!hostWindow)
             !targets->createTileElement || !targets->progressPositionProp ||
             !targets->getProgressHWND || !targets->onPropertyChanged ||
             !targets->operationTileDestructor ||
+            !targets->constructor ||
+            !targets->writeCurrentItem ||
+            !targets->writeProgressValues ||
+            !targets->refreshDisplayProgress ||
+            !targets->getProgressValues ||
+            !targets->updateLocations ||
+            !targets->updateProgress6 ||
             !targets->updateRemainingItemsAndSize || !targets->updateSummary ||
             !targets->setTileDisplayMode || !targets->calculateRate)
         {
@@ -8830,6 +9844,7 @@ if (!hostWindow)
             Wh_Log(L"Skin setup failed: unable to hook "
                    L"shell32!COperationStatusTile::_CreateTileElement");
             return false;
+
         }
 
         if (!WindhawkUtils::SetFunctionHook(
@@ -8858,6 +9873,98 @@ if (!hostWindow)
                 &COperationStatusTile_UpdateRemainingItemsAndSize_Original))
         {
             Wh_Log(L"Skin setup failed: unable to hook native byte update");
+            return false;
+        }
+
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.updateLocations,
+                CProgressDialog_UpdateLocations_Hook,
+                &CProgressDialog_UpdateLocations_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!CProgressDialog::UpdateLocations");
+            return false;
+        }
+
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.updateProgress6,
+                CProgressDialog_UpdateProgress6_Hook,
+                &CProgressDialog_UpdateProgress6_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!CProgressDialog::UpdateProgress(6)");
+            return false;
+        }
+
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.constructor,
+                COperationStatusTile_Constructor_Hook,
+                &COperationStatusTile_Constructor_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!COperationStatusTile::COperationStatusTile");
+            return false;
+        }
+
+        if (targets.readCurrentItem &&
+            !WindhawkUtils::SetFunctionHook(
+                targets.readCurrentItem,
+                COperationDataProvider_ReadCurrentItem_Hook,
+                &COperationDataProvider_ReadCurrentItem_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!COperationDataProvider::ReadCurrentItem");
+            return false;
+        }
+
+        if (targets.readProgressValues &&
+            !WindhawkUtils::SetFunctionHook(
+                targets.readProgressValues,
+                COperationDataProvider_ReadProgressValues_Hook,
+                &COperationDataProvider_ReadProgressValues_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!COperationDataProvider::ReadProgressValues");
+            return false;
+        }
+
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.writeCurrentItem,
+                COperationDataProvider_WriteCurrentItem_Hook,
+                &COperationDataProvider_WriteCurrentItem_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!COperationDataProvider::WriteCurrentItem");
+            return false;
+        }
+
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.writeProgressValues,
+                COperationDataProvider_WriteProgressValues_Hook,
+                &COperationDataProvider_WriteProgressValues_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!COperationDataProvider::WriteProgressValues");
+            return false;
+        }
+
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.refreshDisplayProgress,
+                COperationStatusTile_RefreshDisplayProgress_Hook,
+                &COperationStatusTile_RefreshDisplayProgress_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!COperationStatusTile::_RefreshDisplayProgress");
+            return false;
+        }
+
+        if (!WindhawkUtils::SetFunctionHook(
+                targets.getProgressValues,
+                COperationStatusTileCache_GetProgressValues_Hook,
+                &COperationStatusTileCache_GetProgressValues_Original))
+        {
+            Wh_Log(L"Skin setup failed: unable to hook "
+                   L"shell32!COperationStatusTileCache::GetProgressValues");
             return false;
         }
 
@@ -8927,7 +10034,8 @@ void Wh_ModBeforeUninit()
     {
         std::unique_lock<std::mutex> lock(g_presentationActivationMutex);
         g_presentationActivationCondition.wait(
-            lock, [] { return g_presentationActivations == 0; });
+            lock, []
+            { return g_presentationActivations == 0; });
     }
     DestroyAllProgressCircles();
     Wh_Log(L"File Operation Styler 1.0.0 presentation teardown complete");
@@ -8944,7 +10052,6 @@ void Wh_ModUninit()
     ShutdownDwmApi();
     Wh_Log(L"File Operation Styler 1.0.0 uninitialization complete");
 }
-
 
 BOOL Wh_ModSettingsChanged(BOOL *bReload)
 {
