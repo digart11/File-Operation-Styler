@@ -795,7 +795,7 @@ namespace
         int circleStroke = 7;
         int infoXOffset = 0;
         int infoTop = 72;
-        int compactPanelHeight = 72;
+        int compactPanelHeight = 84;
         int expandedPanelHeight = 144;
         int itemsY = 0;
         int speedY = 20;
@@ -803,7 +803,7 @@ namespace
         int progressHeight = 8;
         int graphY = 82;
         int graphHeight = 60;
-        int compactTileHeight = 136;
+        int compactTileHeight = 148;
         int expandedTileHeight = 226;
         int footerReserveHeight = 52;
         int nativeChartAreaHeight = 60;
@@ -2786,8 +2786,7 @@ namespace
             snapshot.expanded &&
             snapshot.currentItemName.find_first_not_of(L" \t\r\n") !=
                 std::wstring::npos;
-        int expandedDetailOffset =
-            showCurrentItem ? ScaleForDpi(16, dpi) : 0;
+        int detailLineReserve = ScaleForDpi(12, dpi);
 
         if (elements.showDescription)
         {
@@ -2997,7 +2996,7 @@ namespace
             Gdiplus::RectF currentItemBounds(
                 static_cast<Gdiplus::REAL>(contentLeft),
                 static_cast<Gdiplus::REAL>(
-                    detailsOffset - ScaleForDpi(6, dpi)),
+                    detailsOffset - ScaleForDpi(8, dpi)),
                 static_cast<Gdiplus::REAL>(contentWidth),
                 static_cast<Gdiplus::REAL>(ScaleForDpi(20, dpi)));
             graphics.DrawString(
@@ -3072,7 +3071,7 @@ namespace
             Gdiplus::REAL speedX =
                 static_cast<Gdiplus::REAL>(contentLeft);
             Gdiplus::REAL speedY = static_cast<Gdiplus::REAL>(
-                detailsOffset + expandedDetailOffset +
+                detailsOffset + detailLineReserve +
                 ScaleForDpi(kInfoPanelSpeedTop, dpi));
             drawInlineSegment(L"Speed: ", &secondaryBrush, speedY, &speedX);
             drawInlineSegment(rateValue, &primaryBrush, speedY, &speedX);
@@ -3121,7 +3120,7 @@ namespace
             Gdiplus::REAL itemsX =
                 static_cast<Gdiplus::REAL>(contentLeft);
             Gdiplus::REAL itemsY = static_cast<Gdiplus::REAL>(
-                detailsOffset + expandedDetailOffset +
+                detailsOffset + detailLineReserve +
                 ScaleForDpi(kInfoPanelItemsTop, dpi));
             drawInlineSegment(snapshot.itemsRemainingLabel.c_str(),
                               &secondaryBrush, itemsY, &itemsX);
@@ -3132,7 +3131,7 @@ namespace
         if (elements.showProgressBar)
         {
             Gdiplus::REAL progressTop = static_cast<Gdiplus::REAL>(
-                detailsOffset + expandedDetailOffset +
+                detailsOffset + detailLineReserve +
                 ScaleForDpi(kInfoPanelProgressTop, dpi));
             Gdiplus::REAL progressHeight = static_cast<Gdiplus::REAL>(
                 ScaleForDpi(kInfoPanelProgressHeight, dpi));
