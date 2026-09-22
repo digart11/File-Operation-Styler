@@ -76,20 +76,35 @@ Settings changes apply to new file-operation windows; operations already in prog
     - light: Light
     - system: Windows / System
     - glass: Glass
+  - glassTint: ""
+    $name: Glass tint
+    #! $format: colorRgb
+    $description: "Optional hex color such as #203040. Leave blank for neutral tint."
+    #! $showIf: {preset: glass}
+  - glassStrength: 0
+    $name: Glass tint strength
+    #! $min: 0     #! $max: 100     #! $format: slider
+    $description: Tint strength from 0 to 100. Zero keeps the normal Glass appearance.
+    #! $showIf: {preset: glass}
   - colors:
     - backgroundOverride: ""
       $name: Background
+      #! $format: colorRgb
     - accentOverride: ""
       $name: Accent
+      #! $format: colorRgb
       $description: Circle, progress bar, graph, and links.
     - primaryTextOverride: ""
       $name: Main text
+      #! $format: colorRgb
       $description: Large numbers and values.
     - secondaryTextOverride: ""
       $name: Secondary text
+      #! $format: colorRgb
       $description: Labels and smaller text.
     - inactiveOverride: ""
       $name: Track / inactive
+      #! $format: colorRgb
       $description: Circle track and progress track.
     $name: Colors
     $description: "Leave blank to use the theme color. Enter a hex color such as #2D8BE0."
@@ -866,6 +881,9 @@ namespace
         LayoutConfig layout{};
         TypographyConfig typography{};
         ElementConfig elements{};
+
+        COLORREF glassTint = RGB(0, 0, 0);
+        int glassStrength = 0;
     };
 
     const LayoutConfig kDefaultLayout{};
@@ -1207,6 +1225,20 @@ namespace
         }
 
         g_settings.theme = MakePresetTheme(g_settings.preset);
+
+        std::wstring glassTintValue =
+            GetStringSettingValue(
+                L"customization.glassTint");
+
+        COLORREF parsedGlassTint{};
+        if (ParseColorValue(glassTintValue, &parsedGlassTint))
+        {
+            g_settings.glassTint = parsedGlassTint;
+        }
+
+        g_settings.glassStrength =
+            GetClampedIntSetting(
+                L"customization.glassStrength", 0, 100);
 
         bool anyColorOverride = false;
 
@@ -2808,6 +2840,28 @@ namespace
         {
             graphics.FillRectangle(
                 &backgroundBrush,
+                0,
+                0,
+                width,
+                height);
+        }
+
+        else if (g_settings.glassStrength > 0)
+        {
+            int tintAlpha = std::clamp(
+                g_settings.glassStrength * 255 / 100,
+                0,
+                255);
+
+            Gdiplus::SolidBrush tintBrush(
+                Gdiplus::Color(
+                    tintAlpha,
+                    GetRValue(g_settings.glassTint),
+                    GetGValue(g_settings.glassTint),
+                    GetBValue(g_settings.glassTint)));
+
+            graphics.FillRectangle(
+                &tintBrush,
                 0,
                 0,
                 width,
