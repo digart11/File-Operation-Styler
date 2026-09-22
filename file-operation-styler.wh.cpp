@@ -1388,6 +1388,7 @@ namespace
     constexpr DWORD kDwmwaCaptionColor = 35;
     constexpr DWORD kDwmwaTextColor = 36;
     constexpr COLORREF kDwmColorDefault = 0xFFFFFFFF;
+    constexpr COLORREF kDwmColorNone = 0xFFFFFFFE;
     constexpr DWORD kDwmwaSystemBackdropType = 38;
     constexpr int kDwmsbtAuto = 0;
     constexpr int kDwmsbtTransientWindow = 3;
@@ -1547,7 +1548,10 @@ namespace
         }
 
         BOOL darkMode = IsDarkColor(kBackgroundColor) ? TRUE : FALSE;
-        COLORREF captionColor = kBackgroundColor;
+        // Suppress only Glass's native caption fill so DWM's Acrylic shows
+        // through behind the native caption text and buttons.
+        COLORREF captionColor =
+            IsGlassTheme() ? kDwmColorNone : kBackgroundColor;
         COLORREF textColor = kPrimaryTextColor;
         COLORREF borderColor = kInactiveRingColor;
 
@@ -4248,7 +4252,8 @@ namespace
 
     void DrawFooterOverlayFrame(HWND footerWindow,
                                 HDC deviceContext,
-                                RECT const &clientRect)
+                                RECT const &clientRect,
+                                bool glassHostPaint = false)
     {
         int width = clientRect.right - clientRect.left;
         int height = clientRect.bottom - clientRect.top;
@@ -4277,12 +4282,17 @@ namespace
         Gdiplus::Graphics graphics(deviceContext);
         graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         graphics.SetTextRenderingHint(
-            Gdiplus::TextRenderingHintClearTypeGridFit);
+            glassHostPaint
+                ? Gdiplus::TextRenderingHintAntiAliasGridFit
+                : Gdiplus::TextRenderingHintClearTypeGridFit);
 
         Gdiplus::SolidBrush backgroundBrush(Gdiplus::Color(
             255, GetRValue(theme.background), GetGValue(theme.background),
             GetBValue(theme.background)));
-        graphics.FillRectangle(&backgroundBrush, 0, 0, width, height);
+        if (!glassHostPaint)
+        {
+            graphics.FillRectangle(&backgroundBrush, 0, 0, width, height);
+        }
 
         Gdiplus::Font footerFont(
             type.bodyFont.c_str(),
@@ -4542,6 +4552,115 @@ namespace
                    : nullptr;
     }
 
+    bool GetGlassFooterBounds(HWND hostWindow,
+                              HWND *footerWindow,
+                              RECT *hostBounds)
+    {
+        if (!IsGlassTheme() || IsHostInSpecialOperationState(hostWindow))
+        {
+            return false;
+        }
+
+        HWND footer = GetFooterOverlayWindow(hostWindow);
+        RECT screenBounds{};
+        if (!footer || !GetWindowRect(footer, &screenBounds))
+        {
+            return false;
+        }
+        POINT origin{screenBounds.left, screenBounds.top};
+        if (!ScreenToClient(hostWindow, &origin))
+        {
+            return false;
+        }
+        *footerWindow = footer;
+        *hostBounds = {origin.x, origin.y,
+                       origin.x + screenBounds.right - screenBounds.left,
+                       origin.y + screenBounds.bottom - screenBounds.top};
+        return hostBounds->right > hostBounds->left &&
+               hostBounds->bottom > hostBounds->top;
+    }
+
+    void DrawGlassHostFooter(HWND hostWindow, HDC deviceContext)
+    {
+        HWND footerWindow = nullptr;
+        RECT bounds{};
+        if (!GetGlassFooterBounds(hostWindow, &footerWindow, &bounds))
+        {
+            return;
+        }
+
+        int savedDc = SaveDC(deviceContext);
+        if (!savedDc)
+        {
+            return;
+        }
+        if (SetViewportOrgEx(deviceContext, bounds.left, bounds.top, nullptr))
+        {
+            RECT local{0, 0, bounds.right - bounds.left,
+                       bounds.bottom - bounds.top};
+            if (IntersectClipRect(deviceContext, 0, 0,
+                                  local.right, local.bottom) != ERROR)
+            {
+                DrawFooterOverlayFrame(
+                    footerWindow, deviceContext, local, true);
+            }
+        }
+        RestoreDC(deviceContext, savedDc);
+    }
+
+    bool RouteGlassFooterMouseMessage(HWND hostWindow,
+                                      UINT message,
+                                      WPARAM wParam,
+                                      LPARAM lParam,
+                                      LRESULT *result)
+    {
+        if (message != WM_LBUTTONUP && message != WM_SETCURSOR &&
+            message != WM_MOUSEACTIVATE)
+        {
+            return false;
+        }
+        if (message != WM_LBUTTONUP && LOWORD(lParam) != HTCLIENT)
+        {
+            return false;
+        }
+
+        HWND footerWindow = nullptr;
+        RECT bounds{};
+        if (!GetGlassFooterBounds(hostWindow, &footerWindow, &bounds))
+        {
+            return false;
+        }
+        POINT point{};
+        if (message == WM_LBUTTONUP)
+        {
+            point = {static_cast<short>(LOWORD(lParam)),
+                     static_cast<short>(HIWORD(lParam))};
+        }
+        else if (!GetCursorPos(&point) ||
+                 !ScreenToClient(hostWindow, &point))
+        {
+            return false;
+        }
+        if (!PtInRect(&bounds, point))
+        {
+            return false;
+        }
+
+        if (message == WM_LBUTTONUP)
+        {
+            lParam = MAKELPARAM(point.x - bounds.left, point.y - bounds.top);
+        }
+        else if (message == WM_SETCURSOR)
+        {
+            wParam = reinterpret_cast<WPARAM>(footerWindow);
+        }
+        // The hidden footer remains the existing command/geometry anchor.
+        // Its procedure still handles hit testing, native commands, the hand
+        // cursor and MA_NOACTIVATE. No transparent child surface is involved.
+        *result = SendMessageW(footerWindow, message, wParam, lParam);
+        return true;
+    }
+
     void PositionFooterOverlay(OperationTileElement *tile)
     {
         if (!tile || !g_footerOverlayClassAtom)
@@ -4596,8 +4715,9 @@ namespace
             footerWindow, HWND_TOP,
             0, overlayTop, overlayWidth, overlayHeight,
             SWP_NOACTIVATE | SWP_NOOWNERZORDER |
-                SWP_SHOWWINDOW);
-        InvalidateRect(footerWindow, nullptr, FALSE);
+                (IsGlassTheme() ? SWP_HIDEWINDOW : SWP_SHOWWINDOW));
+        InvalidateRect(IsGlassTheme() ? hostWindow : footerWindow,
+                       nullptr, FALSE);
     }
 
     void ForgetCircleWindow(HWND circleWindow);
@@ -5800,6 +5920,13 @@ namespace
             }
         }
 
+        LRESULT footerResult = 0;
+        if (RouteGlassFooterMouseMessage(
+                window, message, wParam, lParam, &footerResult))
+        {
+            return footerResult;
+        }
+
         if (message == WM_PAINT &&
             IsGlassTheme())
         {
@@ -5936,6 +6063,8 @@ namespace
                         window,
                         bufferDc);
                 }
+
+                DrawGlassHostFooter(window, bufferDc);
 
                 Wh_Log(
                     L"Glass test: full info panel drawn=%d",
