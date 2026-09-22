@@ -57,6 +57,10 @@ Settings changes apply to new file-operation windows; operations already in prog
 
 // ==WindhawkModSettings==
 /*
+- showCurrentFileProgressBar: true
+  $name: Show current-file progress bar
+  $description: Show progress for the file currently being copied or moved.
+
 - customization:
   - enabled: false
     $name: Enable customization
@@ -868,6 +872,7 @@ namespace
     const TypographyConfig kDefaultTypography{};
     const ElementConfig kDefaultElements{};
     ModSettings g_settings{};
+    bool g_showCurrentFileProgressBar = true;
 
     bool IsGlassTheme()
     {
@@ -1187,6 +1192,9 @@ namespace
         // expose only meaningful style controls; geometry/visibility internals
         // remain fixed so customization can't accidentally break the layout.
         g_settings = ModSettings{};
+
+        g_showCurrentFileProgressBar =
+            Wh_GetIntSetting(L"showCurrentFileProgressBar") != 0;
 
         g_settings.customizationEnabled =
             Wh_GetIntSetting(L"customization.enabled") != 0;
@@ -1515,6 +1523,14 @@ namespace
             reinterpret_cast<void *>(hostWindow));
 
         SetGlassClientFrameExtension(hostWindow, true);
+
+        // Desktop Acrylic otherwise uses its solid inactive fallback. Keep
+        // DWM's nonclient appearance active without activating the HWND.
+        // Also covers applying/resuming Glass on an already inactive host.
+        if (!IsIconic(hostWindow))
+        {
+            DefWindowProcW(hostWindow, WM_NCACTIVATE, TRUE, -1);
+        }
     }
 
     void ApplyHostThemeColors(HWND hostWindow)
@@ -1613,6 +1629,10 @@ namespace
                 kDwmwaSystemBackdropType,
                 &backdropType,
                 sizeof(backdropType));
+
+            // Reset on the owning UI thread for native special states/unload.
+            DefWindowProcW(hostWindow, WM_NCACTIVATE,
+                           GetActiveWindow() == hostWindow, -1);
         }
     }
 
@@ -1646,6 +1666,21 @@ namespace
     constexpr UINT_PTR kProgressWindowSubclassId = 0xF0510011;
     constexpr WPARAM kRemoveProgressWindowSubclassCommand = 1;
 
+    constexpr UINT kCurrentFileAnimationMessage = WM_APP + 0x51;
+    constexpr UINT_PTR kCurrentFileAnimationTimer = 0xF0510020;
+
+    struct CurrentFileAnimation
+    {
+        double displayedPercent = 0.0;
+        double fromPercent = 0.0;
+        int targetPercent = 0;
+        ULONGLONG startTick = 0;
+        unsigned long long fileStartBytes = 0;
+        unsigned long long fileSize = 0;
+        bool identityValid = false;
+        bool timerRunning = false;
+    };
+
     struct CircleState
     {
         OperationTileElement *tile;
@@ -1666,6 +1701,7 @@ namespace
         int positionWidth;
         int positionHeight;
         bool positionValid;
+        CurrentFileAnimation currentFileAnimation{};
     };
 
     struct HostPositionRequest
@@ -1964,13 +2000,20 @@ namespace
     void PositionProgressCirclesForHost(HWND hostWindow, PCWSTR reason);
     void PositionInfoPanel(OperationTileElement *tile);
     void PositionFooterOverlay(OperationTileElement *tile);
-    void InvalidateInfoPanelForTile(OperationTileElement *tile);
+    void InvalidateInfoPanelForTile(OperationTileElement *tile,
+                                    bool notifyAnimation = true);
+    void StopCurrentFileAnimation(HWND infoWindow);
     void ScheduleProgressCirclePosition(HWND hostWindow, PCWSTR reason);
     void HandleDeferredDisplaySnapshot(HWND hostWindow,
                                        unsigned long long transitionId);
     void ScheduleDeferredDisplaySnapshot(COperationStatusTile *owner,
                                          unsigned long long transitionId,
                                          bool requestedExpanded);
+    bool ResizeOperationStatusWindowForMode(
+        HWND hostWindow,
+        bool expanded,
+        unsigned long long transitionId);
+
     bool ApplyDisplayMode(COperationStatusTile *owner,
                           bool applyFinalHostGeometry,
                           unsigned long long transitionId = 0);
@@ -2314,7 +2357,7 @@ namespace
     struct InfoPanelSnapshot
     {
         int percent = 0;
-        int currentFilePercent = 0;
+        double displayedCurrentFilePercent = 0.0;
         bool currentFileProgressValid = false;
         unsigned long long completedBytes = 0;
         unsigned long long totalBytes = 0;
@@ -2346,6 +2389,7 @@ namespace
         OperationTileElement *tile = nullptr;
         bool storedPaused = false;
         bool storedPausedKnown = false;
+        CurrentFileAnimation animation{};
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
             auto it = std::find_if(
@@ -2360,6 +2404,7 @@ namespace
             snapshot->percent = std::clamp(it->progressPercent, 0, 100);
             storedPaused = it->paused;
             storedPausedKnown = it->pausedStateKnown;
+            animation = it->currentFileAnimation;
         }
 
         // The per-tile state is authoritative after this operation's custom
@@ -2398,7 +2443,17 @@ namespace
         snapshot->completedItems = stateCopy.completedItems;
         snapshot->totalItems = stateCopy.totalItems;
         snapshot->bytesValid = stateCopy.bytesValid;
-        snapshot->currentFilePercent = stateCopy.currentFilePercent;
+        // A newly observed identity renders zero even if its animation-start
+        // message hasn't been dispatched yet. Never show the previous file.
+        if (animation.identityValid &&
+            animation.fileStartBytes == stateCopy.currentFileStartBytes &&
+            animation.fileSize == stateCopy.currentFileSize)
+        {
+            snapshot->displayedCurrentFilePercent = std::min(
+                animation.displayedPercent,
+                static_cast<double>(std::clamp(
+                    stateCopy.currentFilePercent, 0, 100)));
+        }
         snapshot->currentFileProgressValid =
             stateCopy.currentFileProgressValid;
         snapshot->itemsValid = stateCopy.itemsValid;
@@ -3157,7 +3212,8 @@ namespace
             drawInlineSegment(itemsValue, &primaryBrush, itemsY, &itemsX);
         }
 
-        if (elements.showProgressBar)
+        if (elements.showProgressBar &&
+            g_showCurrentFileProgressBar)
         {
             Gdiplus::REAL progressTop = static_cast<Gdiplus::REAL>(
                 detailsOffset + detailLineReserve +
@@ -3180,9 +3236,9 @@ namespace
                 static_cast<Gdiplus::REAL>(
                     std::clamp(
                         snapshot.currentFileProgressValid
-                            ? snapshot.currentFilePercent
-                            : snapshot.percent,
-                        0, 100)) /
+                            ? snapshot.displayedCurrentFilePercent
+                            : static_cast<double>(snapshot.percent),
+                        0.0, 100.0)) /
                 100.0f;
             if (completedWidth > 0.0f)
             {
@@ -3781,6 +3837,14 @@ namespace
 
         if (infoWindow && IsWindow(infoWindow))
         {
+            if (paused)
+            {
+                StopCurrentFileAnimation(infoWindow);
+            }
+            else
+            {
+                PostMessageW(infoWindow, kCurrentFileAnimationMessage, 0, 0);
+            }
             RedrawWindow(
                 infoWindow, nullptr, nullptr,
                 RDW_INVALIDATE | RDW_UPDATENOW);
@@ -3836,11 +3900,176 @@ namespace
         return invoked;
     }
 
+    void StopCurrentFileAnimation(HWND infoWindow)
+    {
+        // Called only by the owning window thread, including teardown.
+        KillTimer(infoWindow, kCurrentFileAnimationTimer);
+        std::lock_guard<std::mutex> lock(g_circleMutex);
+        for (CircleState &state : g_circles)
+        {
+            if (state.infoWindow == infoWindow)
+            {
+                state.currentFileAnimation.timerRunning = false;
+                break;
+            }
+        }
+    }
+
+    void AdvanceCurrentFileAnimation(CurrentFileAnimation &animation,
+                                     unsigned long long fileStartBytes,
+                                     unsigned long long fileSize,
+                                     int realPercent,
+                                     ULONGLONG now)
+    {
+        int target = std::clamp(realPercent, 0, 100);
+        bool newFile = !animation.identityValid ||
+                       animation.fileStartBytes != fileStartBytes ||
+                       animation.fileSize != fileSize;
+        if (newFile)
+        {
+            animation.identityValid = true;
+            animation.fileStartBytes = fileStartBytes;
+            animation.fileSize = fileSize;
+            animation.displayedPercent = 0.0;
+        }
+        else if (animation.timerRunning)
+        {
+            // Advance the previous segment before retargeting. Frequent real
+            // updates must not continually restart an unmoving animation.
+            double durationMs = animation.targetPercent == 100 ? 144.0 : 96.0;
+            double fraction = std::clamp(
+                static_cast<double>(now - animation.startTick) / durationMs,
+                0.0, 1.0);
+            animation.displayedPercent = std::min(
+                animation.fromPercent +
+                    (animation.targetPercent - animation.fromPercent) * fraction,
+                static_cast<double>(target));
+        }
+
+        // Retarget from the displayed value; never extrapolate byte progress.
+        // A newer file takes over immediately, without a completion backlog.
+        if (newFile || target != animation.targetPercent ||
+            !animation.timerRunning)
+        {
+            animation.displayedPercent = std::min(
+                animation.displayedPercent, static_cast<double>(target));
+            animation.fromPercent = animation.displayedPercent;
+            animation.targetPercent = target;
+            animation.startTick = now;
+        }
+    }
+
+    void UpdateCurrentFileAnimation(HWND infoWindow, bool timerTick)
+    {
+        CircleState circle{};
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto it = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [infoWindow](CircleState const &state)
+                { return state.infoWindow == infoWindow; });
+            if (it == g_circles.end() || !it->tile)
+            {
+                KillTimer(infoWindow, kCurrentFileAnimationTimer);
+                return;
+            }
+            circle = *it;
+        }
+
+        // KillTimer doesn't remove already queued WM_TIMER messages.
+        if (timerTick && !circle.currentFileAnimation.timerRunning)
+        {
+            return;
+        }
+        if (g_unloading.load(std::memory_order_acquire) ||
+            !g_showCurrentFileProgressBar || !ActiveElements().showProgressBar ||
+            circle.paused || IsHostInSpecialOperationState(circle.hostWindow))
+        {
+            StopCurrentFileAnimation(infoWindow);
+            return;
+        }
+
+        bool valid = false;
+        unsigned long long fileStartBytes = 0;
+        unsigned long long fileSize = 0;
+        int target = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [&circle](TransferSummaryState const &state)
+                { return state.tile == circle.tile; });
+            if (it != g_transferSummaries.end())
+            {
+                valid = it->currentFileProgressValid && it->currentFileSize > 0;
+                fileStartBytes = it->currentFileStartBytes;
+                fileSize = it->currentFileSize;
+                target = it->currentFilePercent;
+            }
+        }
+
+        CurrentFileAnimation animation = circle.currentFileAnimation;
+        bool wasRunning = animation.timerRunning;
+        if (valid)
+        {
+            AdvanceCurrentFileAnimation(
+                animation, fileStartBytes, fileSize, target,
+                GetTickCount64());
+        }
+        else
+        {
+            animation = {};
+        }
+        animation.timerRunning = valid &&
+            animation.displayedPercent < animation.targetPercent;
+
+        if (animation.timerRunning && !wasRunning &&
+            !SetTimer(infoWindow, kCurrentFileAnimationTimer, 16, nullptr))
+        {
+            // Resource failure must leave a truthful, usable static bar.
+            animation.displayedPercent = animation.targetPercent;
+            animation.timerRunning = false;
+        }
+        if (!animation.timerRunning)
+        {
+            KillTimer(infoWindow, kCurrentFileAnimationTimer);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            auto it = std::find_if(
+                g_circles.begin(), g_circles.end(),
+                [infoWindow, &circle](CircleState const &state)
+                { return state.infoWindow == infoWindow &&
+                         state.tile == circle.tile; });
+            if (it == g_circles.end())
+            {
+                KillTimer(infoWindow, kCurrentFileAnimationTimer);
+                return;
+            }
+            it->currentFileAnimation = animation;
+        }
+        if (animation.displayedPercent !=
+                circle.currentFileAnimation.displayedPercent ||
+            animation.identityValid != circle.currentFileAnimation.identityValid)
+        {
+            // Reuse the Glass/solid repaint routing without posting another
+            // animation notification from our own timer tick.
+            InvalidateInfoPanelForTile(circle.tile, false);
+        }
+    }
+
     LRESULT CALLBACK InfoPanelWindowProc(HWND window,
                                          UINT message,
                                          WPARAM wParam,
                                          LPARAM lParam)
     {
+        if (message == WM_DESTROY ||
+            (g_removeHostSubclassMessage &&
+             message == g_removeHostSubclassMessage))
+        {
+            StopCurrentFileAnimation(window);
+        }
         if (g_removeHostSubclassMessage &&
             message == g_removeHostSubclassMessage)
         {
@@ -3848,11 +4077,22 @@ namespace
         }
         if (g_unloading.load(std::memory_order_acquire))
         {
+            StopCurrentFileAnimation(window);
             return DefWindowProcW(window, message, wParam, lParam);
         }
 
         switch (message)
         {
+        case kCurrentFileAnimationMessage:
+            UpdateCurrentFileAnimation(window, false);
+            return 0;
+        case WM_TIMER:
+            if (wParam == kCurrentFileAnimationTimer)
+            {
+                UpdateCurrentFileAnimation(window, true);
+                return 0;
+            }
+            break;
         case WM_PAINT:
             PaintInfoPanel(window);
             return 0;
@@ -4969,6 +5209,10 @@ namespace
 
         for (HWND child : windows)
         {
+            if (child && IsWindow(child))
+            {
+                StopCurrentFileAnimation(child);
+            }
             if (child && IsWindow(child) && IsWindowVisible(child))
             {
                 ShowWindow(child, SW_HIDE);
@@ -5710,6 +5954,16 @@ namespace
             return 0;
         }
         LRESULT result = DefSubclassProc(window, message, wParam, lParam);
+        if (message == WM_NCACTIVATE && IsGlassTheme() &&
+            !g_unloading.load(std::memory_order_acquire) &&
+            IsWindow(window) && !IsIconic(window) &&
+            !IsHostInSpecialOperationState(window))
+        {
+            // Let Explorer process the real activation notification first.
+            // Only DWM's appearance is held active; WM_ACTIVATE, focus, and
+            // the native return value are preserved. No backdrop recreation.
+            DefWindowProcW(window, WM_NCACTIVATE, TRUE, -1);
+        }
         if (message == WM_SETTEXT || message == WM_SIZE ||
             message == WM_WINDOWPOSCHANGED)
         {
@@ -5755,7 +6009,73 @@ namespace
         }
         if (message == WM_SIZE)
         {
-            PositionProgressCirclesForHost(window, L"host-size-sync");
+            // Explorer can restore its cached/native width after a
+            // minimize/restore cycle. Reapply the verified custom
+            // Glass geometry once the host is restored.
+            if (wParam == SIZE_RESTORED &&
+                IsGlassTheme() &&
+                !IsHostInSpecialOperationState(window))
+            {
+                static thread_local bool repairingRestoreGeometry;
+
+                if (!repairingRestoreGeometry)
+                {
+                    OperationTileElement *hostTile = nullptr;
+
+                    {
+                        std::lock_guard<std::mutex> lock(g_circleMutex);
+
+                        auto circleIt = std::find_if(
+                            g_circles.begin(),
+                            g_circles.end(),
+                            [window](CircleState const &candidate)
+                            {
+                                return candidate.hostWindow == window &&
+                                       candidate.tile != nullptr;
+                            });
+
+                        if (circleIt != g_circles.end())
+                        {
+                            hostTile = circleIt->tile;
+                        }
+                    }
+
+                    bool modeKnown = false;
+                    bool expanded = false;
+
+                    if (hostTile)
+                    {
+                        std::lock_guard<std::mutex> lock(
+                            g_transferSummaryMutex);
+
+                        auto stateIt = std::find_if(
+                            g_transferSummaries.begin(),
+                            g_transferSummaries.end(),
+                            [hostTile](TransferSummaryState const &candidate)
+                            {
+                                return candidate.tile == hostTile &&
+                                       candidate.displayModeKnown;
+                            });
+
+                        if (stateIt != g_transferSummaries.end())
+                        {
+                            modeKnown = true;
+                            expanded = stateIt->expanded;
+                        }
+                    }
+
+                    if (modeKnown)
+                    {
+                        repairingRestoreGeometry = true;
+                        ResizeOperationStatusWindowForMode(
+                            window, expanded, 0);
+                        repairingRestoreGeometry = false;
+                    }
+                }
+            }
+
+            PositionProgressCirclesForHost(
+                window, L"host-size-sync");
             ApplyNativeDisplayRatesForHost(window);
         }
         else if (message == WM_WINDOWPOSCHANGED)
@@ -5903,7 +6223,8 @@ namespace
         return it != g_circles.end() ? it->infoWindow : nullptr;
     }
 
-    void InvalidateInfoPanelForTile(OperationTileElement *tile)
+    void InvalidateInfoPanelForTile(OperationTileElement *tile,
+                                    bool notifyAnimation)
     {
         HWND infoWindow = nullptr;
         HWND hostWindow = nullptr;
@@ -5928,6 +6249,13 @@ namespace
 
         if (infoWindow && IsWindow(infoWindow))
         {
+            // Progress may arrive outside this HWND's thread. Marshal all
+            // animation state/timer changes to its existing window procedure.
+            if (notifyAnimation &&
+                !g_unloading.load(std::memory_order_acquire))
+            {
+                PostMessageW(infoWindow, kCurrentFileAnimationMessage, 0, 0);
+            }
             InvalidateRect(infoWindow, nullptr, FALSE);
         }
 
