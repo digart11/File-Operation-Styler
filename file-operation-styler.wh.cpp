@@ -4693,6 +4693,7 @@ namespace
             std::max(static_cast<int>(clientRect.right), 1);
 
         HWND footerWindow = GetFooterOverlayWindow(hostWindow);
+        bool created = false;
         if (!footerWindow)
         {
             footerWindow = CreateWindowExW(
@@ -4701,23 +4702,83 @@ namespace
                 WS_CHILD | WS_CLIPSIBLINGS,
                 0, overlayTop, overlayWidth, overlayHeight,
                 hostWindow, nullptr, g_circleClassInstance, tile);
+            created = footerWindow != nullptr;
         }
         if (!footerWindow)
         {
             return;
         }
 
-        SetWindowLongPtrW(
-            footerWindow, GWLP_USERDATA,
-            reinterpret_cast<LONG_PTR>(tile));
+        if (GetWindowLongPtrW(footerWindow, GWLP_USERDATA) !=
+            reinterpret_cast<LONG_PTR>(tile))
+        {
+            SetWindowLongPtrW(
+                footerWindow, GWLP_USERDATA,
+                reinterpret_cast<LONG_PTR>(tile));
+        }
 
-        SetWindowPos(
-            footerWindow, HWND_TOP,
-            0, overlayTop, overlayWidth, overlayHeight,
-            SWP_NOACTIVATE | SWP_NOOWNERZORDER |
-                (IsGlassTheme() ? SWP_HIDEWINDOW : SWP_SHOWWINDOW));
-        InvalidateRect(IsGlassTheme() ? hostWindow : footerWindow,
-                       nullptr, FALSE);
+        RECT oldBounds{};
+        bool haveOldBounds = false;
+        bool geometryChanged = true;
+        RECT currentScreen{};
+        if (GetWindowRect(footerWindow, &currentScreen))
+        {
+            POINT origin{currentScreen.left, currentScreen.top};
+            if (ScreenToClient(hostWindow, &origin))
+            {
+                oldBounds = {origin.x, origin.y,
+                             origin.x + currentScreen.right - currentScreen.left,
+                             origin.y + currentScreen.bottom - currentScreen.top};
+                haveOldBounds = true;
+                geometryChanged =
+                    origin.x != 0 || origin.y != overlayTop ||
+                    oldBounds.right - oldBounds.left != overlayWidth ||
+                    oldBounds.bottom - oldBounds.top != overlayHeight;
+            }
+        }
+
+        bool glass = IsGlassTheme();
+        bool isVisible = (GetWindowLongPtrW(footerWindow, GWL_STYLE) &
+                          WS_VISIBLE) != 0;
+        bool shouldShow = !glass;
+        bool visibilityChanged = isVisible != shouldShow;
+        if (!created && !geometryChanged && !visibilityChanged)
+        {
+            return;
+        }
+
+        if (geometryChanged || visibilityChanged)
+        {
+            UINT flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER |
+                         (glass ? SWP_HIDEWINDOW | SWP_NOZORDER
+                                : SWP_SHOWWINDOW);
+            if (!SetWindowPos(footerWindow, HWND_TOP,
+                              0, overlayTop, overlayWidth, overlayHeight,
+                              flags))
+            {
+                return;
+            }
+        }
+
+        if (glass)
+        {
+            // The footer's Glass pixels live in the host. Repaint only the
+            // old and new footer rectangles when placement actually changes.
+            if (!IsHostInSpecialOperationState(hostWindow))
+            {
+                if (haveOldBounds && geometryChanged && !created)
+                {
+                    InvalidateRect(hostWindow, &oldBounds, FALSE);
+                }
+                RECT newBounds{0, overlayTop, overlayWidth,
+                               overlayTop + overlayHeight};
+                InvalidateRect(hostWindow, &newBounds, FALSE);
+            }
+        }
+        else
+        {
+            InvalidateRect(footerWindow, nullptr, FALSE);
+        }
     }
 
     void ForgetCircleWindow(HWND circleWindow);
@@ -5352,6 +5413,9 @@ namespace
         if (IsGlassTheme())
         {
             ApplyUnifiedHostChrome(hostWindow);
+            // Returning from Explorer's native special view replaces the
+            // whole client surface, even when the footer geometry is stable.
+            InvalidateRect(hostWindow, nullptr, FALSE);
         }
         ApplyHostThemeColors(hostWindow);
 
@@ -5917,6 +5981,112 @@ namespace
                     L"host subclass hwnd=%p error=%lu",
                     reinterpret_cast<void *>(window),
                     GetLastError());
+            }
+        }
+
+        if (message == WM_ERASEBKGND &&
+            IsGlassTheme() &&
+            !IsHostInSpecialOperationState(window))
+        {
+            // Glass owns the complete visible client surface.
+            // Prevent Explorer from erasing it immediately before
+            // our buffered WM_PAINT, which can expose a blank frame.
+            return 1;
+        }
+
+        // In Glass mode the info panel is painted into the host rather
+        // than shown as an interactive child. Route the two custom
+        // action controls through the host to their existing native
+        // DirectUI actions.
+        if (IsGlassTheme() &&
+            !IsHostInSpecialOperationState(window) &&
+            (message == WM_LBUTTONUP || message == WM_SETCURSOR))
+        {
+            HWND glassInfoActionWindow = nullptr;
+
+            {
+                std::lock_guard<std::mutex> lock(g_circleMutex);
+
+                for (CircleState const &state : g_circles)
+                {
+                    if (state.hostWindow == window &&
+                        state.infoWindow &&
+                        IsWindow(state.infoWindow))
+                    {
+                        glassInfoActionWindow = state.infoWindow;
+                        break;
+                    }
+                }
+            }
+
+            if (glassInfoActionWindow)
+            {
+                POINT point{};
+                bool havePoint = false;
+
+                if (message == WM_LBUTTONUP)
+                {
+                    point = {
+                        static_cast<short>(LOWORD(lParam)),
+                        static_cast<short>(HIWORD(lParam))};
+                    havePoint = true;
+                }
+                else if (LOWORD(lParam) == HTCLIENT &&
+                         GetCursorPos(&point) &&
+                         ScreenToClient(window, &point))
+                {
+                    havePoint = true;
+                }
+
+                if (havePoint)
+                {
+                    RECT cancelRect{};
+                    RECT pauseRect{};
+
+                    bool previousTransparentPaint =
+                        g_glassTransparentInfoPanelPaint;
+                    g_glassTransparentInfoPanelPaint = true;
+
+                    GetInfoPanelCancelRect(
+                        glassInfoActionWindow, &cancelRect);
+                    GetInfoPanelPauseRect(
+                        glassInfoActionWindow, &pauseRect);
+
+                    g_glassTransparentInfoPanelPaint =
+                        previousTransparentPaint;
+
+                    bool overCancel =
+                        PtInRect(&cancelRect, point) != FALSE;
+                    bool overPause =
+                        PtInRect(&pauseRect, point) != FALSE;
+
+                    if (overCancel || overPause)
+                    {
+                        if (message == WM_SETCURSOR)
+                        {
+                            SetCursor(
+                                LoadCursorW(nullptr, IDC_HAND));
+                            return TRUE;
+                        }
+
+                        if (overCancel)
+                        {
+                            InvokeNativeActionFromInfoPanel(
+                                glassInfoActionWindow,
+                                L"eltCancelButton",
+                                L"cancel-top-x");
+                        }
+                        else
+                        {
+                            InvokeNativeActionFromInfoPanel(
+                                glassInfoActionWindow,
+                                L"eltPauseButton",
+                                L"pause-resume");
+                        }
+
+                        return 0;
+                    }
+                }
             }
         }
 
