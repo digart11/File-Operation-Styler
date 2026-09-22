@@ -71,6 +71,7 @@ Settings changes apply to new file-operation windows; operations already in prog
     - warmDark: Warm Dark
     - light: Light
     - system: Windows / System
+    - glass: Glass
   - colors:
     - backgroundOverride: ""
       $name: Background
@@ -868,6 +869,12 @@ namespace
     const ElementConfig kDefaultElements{};
     ModSettings g_settings{};
 
+    bool IsGlassTheme()
+    {
+        return g_settings.customizationEnabled &&
+               g_settings.preset == L"glass";
+    }
+
     LayoutConfig const &ActiveLayout()
     {
         return g_settings.customizationEnabled ? g_settings.layout
@@ -1060,6 +1067,7 @@ namespace
         else
         {
             // Blue Dark: clearly blue-tinted body with a strong blue accent.
+            // Glass shares this palette; only its host backdrop is different.
             theme.background = RGB(18, 38, 56);
             theme.primaryText = RGB(243, 248, 253);
             theme.secondaryText = RGB(151, 177, 199);
@@ -1376,9 +1384,6 @@ namespace
     constexpr int kDwmsbtAuto = 0;
     constexpr int kDwmsbtTransientWindow = 3;
 
-    // GLASS TEST: expose only the real OperationStatusWindow client.
-    constexpr bool kGlassHostOnlyProbe = true;
-
     static thread_local bool g_glassTransparentInfoPanelPaint = false;
 
     using DwmSetWindowAttribute_t = HRESULT(WINAPI *)(
@@ -1485,6 +1490,11 @@ namespace
 
     void ApplyUnifiedHostChrome(HWND hostWindow)
     {
+        if (!IsGlassTheme())
+        {
+            return;
+        }
+
         DwmSetWindowAttribute_t setAttribute = GetDwmSetWindowAttribute();
         if (!setAttribute || !hostWindow || !IsWindow(hostWindow))
         {
@@ -1505,8 +1515,17 @@ namespace
             reinterpret_cast<void *>(hostWindow));
 
         SetGlassClientFrameExtension(hostWindow, true);
+    }
 
+    void ApplyHostThemeColors(HWND hostWindow)
+    {
         if (!ShouldApplyNativeColorOverrides())
+        {
+            return;
+        }
+
+        DwmSetWindowAttribute_t setAttribute = GetDwmSetWindowAttribute();
+        if (!setAttribute || !hostWindow || !IsWindow(hostWindow))
         {
             return;
         }
@@ -1542,13 +1561,21 @@ namespace
     }
     void ResetUnifiedHostChrome(HWND hostWindow)
     {
+        if (!IsGlassTheme() && !ShouldApplyNativeColorOverrides())
+        {
+            return;
+        }
+
         DwmSetWindowAttribute_t setAttribute = GetDwmSetWindowAttribute();
         if (!setAttribute || !hostWindow || !IsWindow(hostWindow))
         {
             return;
         }
 
-        SetGlassClientFrameExtension(hostWindow, false);
+        if (IsGlassTheme())
+        {
+            SetGlassClientFrameExtension(hostWindow, false);
+        }
 
         BOOL systemDarkMode = IsWindowsAppsDarkMode() ? TRUE : FALSE;
 
@@ -1578,13 +1605,15 @@ namespace
             &defaultColor,
             sizeof(defaultColor));
 
-        int backdropType = kDwmsbtAuto;
-
-        setAttribute(
-            hostWindow,
-            kDwmwaSystemBackdropType,
-            &backdropType,
-            sizeof(backdropType));
+        if (IsGlassTheme())
+        {
+            int backdropType = kDwmsbtAuto;
+            setAttribute(
+                hostWindow,
+                kDwmwaSystemBackdropType,
+                &backdropType,
+                sizeof(backdropType));
+        }
     }
 
 #define kDisplayModeFooterReserveHeight (ActiveLayout().footerReserveHeight)
@@ -4893,14 +4922,14 @@ namespace
         // Special Explorer states must temporarily leave the
         // full-client Acrylic presentation before native DirectUI
         // becomes visible again.
-        if (kGlassHostOnlyProbe)
+        if (IsGlassTheme())
         {
             ResetUnifiedHostChrome(hostWindow);
         }
 
         RestoreNativePresentationForHost(hostWindow);
 
-        if (kGlassHostOnlyProbe)
+        if (IsGlassTheme())
         {
             RestoreGlassDirectUiForHost(hostWindow);
         }
@@ -4956,10 +4985,11 @@ namespace
     void ScheduleCustomReapplyForHost(HWND hostWindow,
                                       bool resumeTransferState)
     {
-        if (kGlassHostOnlyProbe || ShouldApplyNativeColorOverrides())
+        if (IsGlassTheme())
         {
             ApplyUnifiedHostChrome(hostWindow);
         }
+        ApplyHostThemeColors(hostWindow);
 
         std::vector<OperationTileElement *> hostTiles;
         {
@@ -5278,7 +5308,7 @@ namespace
 
     void RestoreGlassDirectUiForHost(HWND hostWindow)
     {
-        if (!hostWindow || !IsWindow(hostWindow))
+        if (!IsGlassTheme() || !hostWindow || !IsWindow(hostWindow))
         {
             return;
         }
@@ -5429,8 +5459,8 @@ namespace
             // Restore Explorer's own normal presentation.
             RestoreNativePresentationForHost(window);
 
-            // Acrylic/full-client frame is applied independently from
-            // native color overrides, so reset it unconditionally.
+            // Settings reload happens after teardown, so the old theme still
+            // selects which caption/backdrop state needs restoring here.
             ResetUnifiedHostChrome(window);
 
             RestoreHostNativeGeometry(window);
@@ -5527,7 +5557,7 @@ namespace
         }
 
         if (message == WM_PAINT &&
-            kGlassHostOnlyProbe)
+            IsGlassTheme())
         {
             Wh_Log(
                 L"Glass test: host buffered WM_PAINT hwnd=%p",
@@ -5901,7 +5931,7 @@ namespace
             InvalidateRect(infoWindow, nullptr, FALSE);
         }
 
-        if (kGlassHostOnlyProbe &&
+        if (IsGlassTheme() &&
             hostWindow &&
             IsWindow(hostWindow))
         {
@@ -5936,7 +5966,7 @@ namespace
             return;
         }
 
-        if (kGlassHostOnlyProbe)
+        if (IsGlassTheme())
         {
             if (infoWindow &&
                 IsWindow(infoWindow) &&
@@ -6323,7 +6353,11 @@ namespace
             }
         }
 
-        ApplyUnifiedHostChrome(hostWindow);
+        if (IsGlassTheme())
+        {
+            ApplyUnifiedHostChrome(hostWindow);
+        }
+        ApplyHostThemeColors(hostWindow);
 
         if (!SetWindowSubclass(hostWindow, OperationStatusWindowSubclassProc,
                                kHostWindowSubclassId, 0))
