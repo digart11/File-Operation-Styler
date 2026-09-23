@@ -86,6 +86,18 @@ Settings changes apply to new file-operation windows; operations already in prog
     #! $min: 0     #! $max: 100     #! $format: slider
     $description: Tint strength from 0 to 100. Zero keeps the normal Glass appearance.
     #! $showIf: {preset: glass}
+  - footerStyle: glass
+    $name: Footer style
+    $description: Choose whether the footer follows the Glass backdrop or uses the normal theme colors.
+    $options:
+    - glass: Glass
+    - solid: Solid
+    #! $showIf: {preset: glass}
+  - footerColor: ""
+    $name: Solid footer color
+    $description: Optional. Leave blank to use the theme background. Accepts #RRGGBB or RRGGBB.
+    #! $format: colorRgb
+    #! $showIf: {footerStyle: solid}
   - colors:
     - backgroundOverride: ""
       $name: Background
@@ -884,6 +896,9 @@ namespace
 
         COLORREF glassTint = RGB(0, 0, 0);
         int glassStrength = 0;
+        std::wstring footerStyle = L"glass";
+        COLORREF footerColor = RGB(0, 0, 0);
+        bool customFooterColor = false;
     };
 
     const LayoutConfig kDefaultLayout{};
@@ -896,6 +911,12 @@ namespace
     {
         return g_settings.customizationEnabled &&
                g_settings.preset == L"glass";
+    }
+
+    bool UseGlassFooter()
+    {
+        return IsGlassTheme() &&
+               g_settings.footerStyle != L"solid";
     }
 
     LayoutConfig const &ActiveLayout()
@@ -1203,7 +1224,6 @@ namespace
         DirectUI::Element *tileHeaderRoot,
         PCWSTR name,
         bool allowHeaderFallback);
-
     void LoadSettings()
     {
         // Start from the proven 0.12 defaults. The public settings intentionally
@@ -1240,6 +1260,20 @@ namespace
             GetClampedIntSetting(
                 L"customization.glassStrength", 0, 100);
 
+        g_settings.footerStyle =
+            GetStringSettingValue(
+                L"customization.footerStyle");
+
+        if (g_settings.footerStyle != L"solid")
+        {
+            g_settings.footerStyle = L"glass";
+        }
+
+        g_settings.customFooterColor =
+            ParseColorValue(
+                GetStringSettingValue(
+                    L"customization.footerColor"),
+                &g_settings.footerColor);
         bool anyColorOverride = false;
 
         bool customBackground = ApplyColorOverride(
@@ -1708,12 +1742,14 @@ namespace
     struct CurrentFileAnimation
     {
         double displayedPercent = 0.0;
-        double fromPercent = 0.0;
-        int targetPercent = 0;
-        ULONGLONG startTick = 0;
+        double targetPercent = 0.0;
+        double displayedOverallPercent = 0.0;
+        double targetOverallPercent = 0.0;
+        ULONGLONG lastTick = 0;
         unsigned long long fileStartBytes = 0;
         unsigned long long fileSize = 0;
         bool identityValid = false;
+        bool overallInitialized = false;
         bool timerRunning = false;
     };
 
@@ -2393,6 +2429,7 @@ namespace
     struct InfoPanelSnapshot
     {
         int percent = 0;
+        double displayedOverallPercent = 0.0;
         double displayedCurrentFilePercent = 0.0;
         bool currentFileProgressValid = false;
         unsigned long long completedBytes = 0;
@@ -2441,6 +2478,13 @@ namespace
             storedPaused = it->paused;
             storedPausedKnown = it->pausedStateKnown;
             animation = it->currentFileAnimation;
+
+            snapshot->displayedOverallPercent =
+                animation.overallInitialized
+                    ? std::clamp(
+                          animation.displayedOverallPercent,
+                          0.0, 100.0)
+                    : static_cast<double>(snapshot->percent);
         }
 
         // The per-tile state is authoritative after this operation's custom
@@ -2485,10 +2529,27 @@ namespace
             animation.fileStartBytes == stateCopy.currentFileStartBytes &&
             animation.fileSize == stateCopy.currentFileSize)
         {
-            snapshot->displayedCurrentFilePercent = std::min(
-                animation.displayedPercent,
-                static_cast<double>(std::clamp(
-                    stateCopy.currentFilePercent, 0, 100)));
+            double realCurrentFilePercent = 0.0;
+
+            if (stateCopy.currentFileSize > 0)
+            {
+                long double rawPercent =
+                    static_cast<long double>(
+                        stateCopy.currentFileCompletedBytes) *
+                    100.0L /
+                    static_cast<long double>(
+                        stateCopy.currentFileSize);
+
+                realCurrentFilePercent =
+                    static_cast<double>(
+                        std::clamp<long double>(
+                            rawPercent, 0.0L, 100.0L));
+            }
+
+            snapshot->displayedCurrentFilePercent =
+                std::min(
+                    animation.displayedPercent,
+                    realCurrentFilePercent);
         }
         snapshot->currentFileProgressValid =
             stateCopy.currentFileProgressValid;
@@ -2689,7 +2750,7 @@ namespace
 
     void DrawEmbeddedProgressCircle(Gdiplus::Graphics &graphics,
                                     UINT dpi,
-                                    int displayProgress,
+                                    double displayProgress,
                                     ThemePalette const &theme,
                                     TypographyConfig const &type)
     {
@@ -2729,8 +2790,8 @@ namespace
             strokeWidth);
         graphics.DrawEllipse(&inactivePen, ringBounds);
 
-        displayProgress = std::clamp(displayProgress, 0, 100);
-        if (displayProgress > 0)
+        displayProgress = std::clamp(displayProgress, 0.0, 100.0);
+        if (displayProgress > 0.0)
         {
             Gdiplus::Pen accentPen(
                 Gdiplus::Color(255, GetRValue(theme.accent),
@@ -2744,8 +2805,12 @@ namespace
                                  3.6f);
         }
 
+        int displayProgressText = std::clamp(
+            static_cast<int>(displayProgress + 0.5),
+            0, 100);
+
         wchar_t percentageText[16]{};
-        wsprintfW(percentageText, L"%d%%", displayProgress);
+        wsprintfW(percentageText, L"%d%%", displayProgressText);
 
         Gdiplus::Font percentageFont(
             type.circleFont.c_str(),
@@ -2846,30 +2911,9 @@ namespace
                 height);
         }
 
-        else if (g_settings.glassStrength > 0)
-        {
-            int tintAlpha = std::clamp(
-                g_settings.glassStrength * 255 / 100,
-                0,
-                255);
-
-            Gdiplus::SolidBrush tintBrush(
-                Gdiplus::Color(
-                    tintAlpha,
-                    GetRValue(g_settings.glassTint),
-                    GetGValue(g_settings.glassTint),
-                    GetBValue(g_settings.glassTint)));
-
-            graphics.FillRectangle(
-                &tintBrush,
-                0,
-                0,
-                width,
-                height);
-        }
 
         DrawEmbeddedProgressCircle(
-            graphics, dpi, snapshot.percent, theme, type);
+            graphics, dpi, snapshot.displayedOverallPercent, theme, type);
 
         int effectiveBodySize =
             type.bodySize +
@@ -3973,47 +4017,116 @@ namespace
         }
     }
 
+    double AdvanceProgressChase(double displayed,
+                                double target,
+                                double elapsedMs)
+    {
+        target = std::clamp(target, 0.0, 100.0);
+
+        // Progress must never visually run ahead of the most recent real value.
+        if (displayed > target)
+        {
+            return target;
+        }
+
+        if (displayed >= target)
+        {
+            return displayed;
+        }
+
+        // Keep following the real value instead of completing a short fixed
+        // animation and waiting. The elapsed-time calculation keeps motion
+        // consistent even when WM_TIMER delivery isn't perfectly regular.
+        double chaseAmount =
+            std::clamp(elapsedMs / 140.0, 0.0, 0.30);
+
+        double next =
+            displayed + (target - displayed) * chaseAmount;
+
+        // Allow a completed operation/file to land exactly on 100%.
+        if (target >= 100.0 && target - next < 0.05)
+        {
+            next = 100.0;
+        }
+
+        return std::min(next, target);
+    }
+
     void AdvanceCurrentFileAnimation(CurrentFileAnimation &animation,
                                      unsigned long long fileStartBytes,
                                      unsigned long long fileSize,
-                                     int realPercent,
+                                     double currentFileTarget,
+                                     double overallTarget,
+                                     bool animateCurrentFile,
+                                     bool animateOverall,
                                      ULONGLONG now)
     {
-        int target = std::clamp(realPercent, 0, 100);
-        bool newFile = !animation.identityValid ||
-                       animation.fileStartBytes != fileStartBytes ||
-                       animation.fileSize != fileSize;
-        if (newFile)
+        double elapsedMs = 16.0;
+
+        if (animation.lastTick != 0 && now >= animation.lastTick)
         {
-            animation.identityValid = true;
-            animation.fileStartBytes = fileStartBytes;
-            animation.fileSize = fileSize;
-            animation.displayedPercent = 0.0;
-        }
-        else if (animation.timerRunning)
-        {
-            // Advance the previous segment before retargeting. Frequent real
-            // updates must not continually restart an unmoving animation.
-            double durationMs = animation.targetPercent == 100 ? 144.0 : 96.0;
-            double fraction = std::clamp(
-                static_cast<double>(now - animation.startTick) / durationMs,
-                0.0, 1.0);
-            animation.displayedPercent = std::min(
-                animation.fromPercent +
-                    (animation.targetPercent - animation.fromPercent) * fraction,
-                static_cast<double>(target));
+            elapsedMs = static_cast<double>(
+                std::min<ULONGLONG>(
+                    now - animation.lastTick,
+                    50));
         }
 
-        // Retarget from the displayed value; never extrapolate byte progress.
-        // A newer file takes over immediately, without a completion backlog.
-        if (newFile || target != animation.targetPercent ||
-            !animation.timerRunning)
+        animation.lastTick = now;
+
+        if (animateOverall)
         {
-            animation.displayedPercent = std::min(
-                animation.displayedPercent, static_cast<double>(target));
-            animation.fromPercent = animation.displayedPercent;
-            animation.targetPercent = target;
-            animation.startTick = now;
+            overallTarget =
+                std::clamp(overallTarget, 0.0, 100.0);
+
+            if (!animation.overallInitialized)
+            {
+                animation.overallInitialized = true;
+                animation.displayedOverallPercent =
+                    std::min(
+                        animation.displayedOverallPercent,
+                        overallTarget);
+            }
+
+            animation.targetOverallPercent = overallTarget;
+
+            animation.displayedOverallPercent =
+                AdvanceProgressChase(
+                    animation.displayedOverallPercent,
+                    animation.targetOverallPercent,
+                    elapsedMs);
+        }
+
+        if (animateCurrentFile)
+        {
+            currentFileTarget =
+                std::clamp(currentFileTarget, 0.0, 100.0);
+
+            bool newFile =
+                !animation.identityValid ||
+                animation.fileStartBytes != fileStartBytes ||
+                animation.fileSize != fileSize;
+
+            if (newFile)
+            {
+                animation.identityValid = true;
+                animation.fileStartBytes = fileStartBytes;
+                animation.fileSize = fileSize;
+                animation.displayedPercent = 0.0;
+            }
+
+            animation.targetPercent = currentFileTarget;
+
+            animation.displayedPercent =
+                AdvanceProgressChase(
+                    animation.displayedPercent,
+                    animation.targetPercent,
+                    elapsedMs);
+        }
+        else
+        {
+            animation.identityValid = false;
+            animation.displayedPercent = 0.0;
+            animation.targetPercent = 0.0;
         }
     }
 
@@ -4039,81 +4152,176 @@ namespace
         {
             return;
         }
+
+        bool animateCurrentFile =
+            g_showCurrentFileProgressBar &&
+            ActiveElements().showProgressBar;
+
+        bool animateOverall =
+            ActiveElements().showCircle;
+
         if (g_unloading.load(std::memory_order_acquire) ||
-            !g_showCurrentFileProgressBar || !ActiveElements().showProgressBar ||
-            circle.paused || IsHostInSpecialOperationState(circle.hostWindow))
+            (!animateCurrentFile && !animateOverall) ||
+            circle.paused ||
+            IsHostInSpecialOperationState(circle.hostWindow))
         {
             StopCurrentFileAnimation(infoWindow);
             return;
         }
 
-        bool valid = false;
+        bool currentFileValid = false;
         unsigned long long fileStartBytes = 0;
         unsigned long long fileSize = 0;
-        int target = 0;
+        double currentFileTarget = 0.0;
+
+        double overallTarget =
+            static_cast<double>(
+                std::clamp(circle.progressPercent, 0, 100));
+
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
             auto it = std::find_if(
-                g_transferSummaries.begin(), g_transferSummaries.end(),
+                g_transferSummaries.begin(),
+                g_transferSummaries.end(),
                 [&circle](TransferSummaryState const &state)
                 { return state.tile == circle.tile; });
+
             if (it != g_transferSummaries.end())
             {
-                valid = it->currentFileProgressValid && it->currentFileSize > 0;
+                currentFileValid =
+                    it->currentFileProgressValid &&
+                    it->currentFileSize > 0;
+
                 fileStartBytes = it->currentFileStartBytes;
                 fileSize = it->currentFileSize;
-                target = it->currentFilePercent;
+
+                if (currentFileValid)
+                {
+                    long double rawCurrentFileTarget =
+                        static_cast<long double>(
+                            it->currentFileCompletedBytes) *
+                        100.0L /
+                        static_cast<long double>(
+                            it->currentFileSize);
+
+                    currentFileTarget =
+                        static_cast<double>(
+                            std::clamp<long double>(
+                                rawCurrentFileTarget,
+                                0.0L, 100.0L));
+                }
+
+                if (it->bytesValid &&
+                    it->totalBytes > 0)
+                {
+                    long double rawOverallTarget =
+                        static_cast<long double>(
+                            it->completedBytes) *
+                        100.0L /
+                        static_cast<long double>(
+                            it->totalBytes);
+
+                    overallTarget =
+                        static_cast<double>(
+                            std::clamp<long double>(
+                                rawOverallTarget,
+                                0.0L, 100.0L));
+                }
             }
         }
 
-        CurrentFileAnimation animation = circle.currentFileAnimation;
-        bool wasRunning = animation.timerRunning;
-        if (valid)
-        {
-            AdvanceCurrentFileAnimation(
-                animation, fileStartBytes, fileSize, target,
-                GetTickCount64());
-        }
-        else
-        {
-            animation = {};
-        }
-        animation.timerRunning = valid &&
-            animation.displayedPercent < animation.targetPercent;
+        CurrentFileAnimation animation =
+            circle.currentFileAnimation;
 
-        if (animation.timerRunning && !wasRunning &&
-            !SetTimer(infoWindow, kCurrentFileAnimationTimer, 16, nullptr))
+        bool wasRunning = animation.timerRunning;
+
+        AdvanceCurrentFileAnimation(
+            animation,
+            fileStartBytes,
+            fileSize,
+            currentFileTarget,
+            overallTarget,
+            animateCurrentFile && currentFileValid,
+            animateOverall,
+            GetTickCount64());
+
+        bool currentFileNeedsTimer =
+            animateCurrentFile &&
+            currentFileValid &&
+            (animation.targetPercent < 100.0 ||
+             animation.displayedPercent <
+                 animation.targetPercent);
+
+        bool overallNeedsTimer =
+            animateOverall &&
+            (animation.targetOverallPercent < 100.0 ||
+             animation.displayedOverallPercent <
+                 animation.targetOverallPercent);
+
+        animation.timerRunning =
+            currentFileNeedsTimer ||
+            overallNeedsTimer;
+
+        if (animation.timerRunning &&
+            !wasRunning &&
+            !SetTimer(
+                infoWindow,
+                kCurrentFileAnimationTimer,
+                16,
+                nullptr))
         {
-            // Resource failure must leave a truthful, usable static bar.
-            animation.displayedPercent = animation.targetPercent;
+            // Resource failure falls back to truthful static progress.
+            animation.displayedPercent =
+                animation.targetPercent;
+            animation.displayedOverallPercent =
+                animation.targetOverallPercent;
             animation.timerRunning = false;
         }
+
         if (!animation.timerRunning)
         {
-            KillTimer(infoWindow, kCurrentFileAnimationTimer);
+            KillTimer(
+                infoWindow,
+                kCurrentFileAnimationTimer);
         }
 
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
+
             auto it = std::find_if(
-                g_circles.begin(), g_circles.end(),
+                g_circles.begin(),
+                g_circles.end(),
                 [infoWindow, &circle](CircleState const &state)
-                { return state.infoWindow == infoWindow &&
-                         state.tile == circle.tile; });
+                {
+                    return state.infoWindow == infoWindow &&
+                           state.tile == circle.tile;
+                });
+
             if (it == g_circles.end())
             {
-                KillTimer(infoWindow, kCurrentFileAnimationTimer);
+                KillTimer(
+                    infoWindow,
+                    kCurrentFileAnimationTimer);
                 return;
             }
+
             it->currentFileAnimation = animation;
         }
+
         if (animation.displayedPercent !=
                 circle.currentFileAnimation.displayedPercent ||
-            animation.identityValid != circle.currentFileAnimation.identityValid)
+            animation.displayedOverallPercent !=
+                circle.currentFileAnimation.displayedOverallPercent ||
+            animation.identityValid !=
+                circle.currentFileAnimation.identityValid ||
+            animation.overallInitialized !=
+                circle.currentFileAnimation.overallInitialized)
         {
-            // Reuse the Glass/solid repaint routing without posting another
-            // animation notification from our own timer tick.
-            InvalidateInfoPanelForTile(circle.tile, false);
+            // Circle and current-file bar share one buffered presentation and
+            // therefore stay visually synchronized.
+            InvalidateInfoPanelForTile(
+                circle.tile,
+                false);
         }
     }
 
@@ -4340,9 +4548,15 @@ namespace
                 ? Gdiplus::TextRenderingHintAntiAliasGridFit
                 : Gdiplus::TextRenderingHintClearTypeGridFit);
 
+        COLORREF footerBackground = theme.background;
+        if (!glassHostPaint && g_settings.customFooterColor)
+        {
+            footerBackground = g_settings.footerColor;
+        }
+
         Gdiplus::SolidBrush backgroundBrush(Gdiplus::Color(
-            255, GetRValue(theme.background), GetGValue(theme.background),
-            GetBValue(theme.background)));
+            255, GetRValue(footerBackground), GetGValue(footerBackground),
+            GetBValue(footerBackground)));
         if (!glassHostPaint)
         {
             graphics.FillRectangle(&backgroundBrush, 0, 0, width, height);
@@ -4610,7 +4824,7 @@ namespace
                               HWND *footerWindow,
                               RECT *hostBounds)
     {
-        if (!IsGlassTheme() || IsHostInSpecialOperationState(hostWindow))
+        if (!UseGlassFooter() || IsHostInSpecialOperationState(hostWindow))
         {
             return false;
         }
@@ -4791,7 +5005,7 @@ namespace
             }
         }
 
-        bool glass = IsGlassTheme();
+        bool glass = UseGlassFooter();
         bool isVisible = (GetWindowLongPtrW(footerWindow, GWL_STYLE) &
                           WS_VISIBLE) != 0;
         bool shouldShow = !glass;
@@ -5823,7 +6037,7 @@ namespace
             return false;
         }
 
-        int progressPercent = 0;
+        double progressPercent = 0.0;
         bool found = false;
 
         {
@@ -5834,7 +6048,15 @@ namespace
                 if (state.hostWindow == hostWindow && state.tile)
                 {
                     progressPercent =
-                        std::clamp(state.progressPercent, 0, 100);
+                        state.currentFileAnimation.overallInitialized
+                            ? std::clamp(
+                                  state.currentFileAnimation
+                                      .displayedOverallPercent,
+                                  0.0, 100.0)
+                            : static_cast<double>(
+                                  std::clamp(
+                                      state.progressPercent,
+                                      0, 100));
 
                     found = true;
                     break;
@@ -6241,6 +6463,29 @@ namespace
 
             if (buffer && bufferDc)
             {
+                if (g_settings.glassStrength > 0)
+                {
+                    int tintAlpha = std::clamp(
+                        g_settings.glassStrength * 255 / 100,
+                        0,
+                        255);
+
+                    Gdiplus::Graphics glassGraphics(bufferDc);
+                    Gdiplus::SolidBrush tintBrush(
+                        Gdiplus::Color(
+                            tintAlpha,
+                            GetRValue(g_settings.glassTint),
+                            GetGValue(g_settings.glassTint),
+                            GetBValue(g_settings.glassTint)));
+
+                    glassGraphics.FillRectangle(
+                        &tintBrush,
+                        0,
+                        0,
+                        client.right - client.left,
+                        client.bottom - client.top);
+                }
+
                 HWND glassInfoWindow = nullptr;
 
                 {
