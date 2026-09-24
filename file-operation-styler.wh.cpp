@@ -2891,6 +2891,22 @@ namespace
         ElementConfig const &elements = ActiveElements();
 
         Gdiplus::Graphics graphics(deviceContext);
+
+        // Normal child-window painting starts at 0,0. A Glass host can contain
+        // several operation tiles, so render each logical panel at the origin
+        // supplied by its host slot and keep its drawing inside that slot.
+        graphics.TranslateTransform(
+            static_cast<Gdiplus::REAL>(clientRect.left),
+            static_cast<Gdiplus::REAL>(clientRect.top));
+
+        graphics.SetClip(
+            Gdiplus::RectF(
+                0.0f,
+                0.0f,
+                static_cast<Gdiplus::REAL>(width),
+                static_cast<Gdiplus::REAL>(height)),
+            Gdiplus::CombineModeReplace);
+
         graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
         graphics.SetTextRenderingHint(
@@ -6270,15 +6286,20 @@ namespace
             return 1;
         }
 
-        // In Glass mode the info panel is painted into the host rather
-        // than shown as an interactive child. Route the two custom
-        // action controls through the host to their existing native
-        // DirectUI actions.
+        // In Glass mode the info panels are painted into the shared host
+        // instead of shown as interactive child windows. Route Pause/Cancel
+        // to the operation tile whose visual slot contains the mouse.
         if (IsGlassTheme() &&
             !IsHostInSpecialOperationState(window) &&
             (message == WM_LBUTTONUP || message == WM_SETCURSOR))
         {
-            HWND glassInfoActionWindow = nullptr;
+            struct GlassActionEntry
+            {
+                OperationTileElement *tile = nullptr;
+                HWND infoWindow = nullptr;
+            };
+
+            std::vector<GlassActionEntry> actionEntries;
 
             {
                 std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -6286,35 +6307,74 @@ namespace
                 for (CircleState const &state : g_circles)
                 {
                     if (state.hostWindow == window &&
+                        state.tile &&
                         state.infoWindow &&
                         IsWindow(state.infoWindow))
                     {
-                        glassInfoActionWindow = state.infoWindow;
-                        break;
+                        actionEntries.push_back(
+                            {state.tile, state.infoWindow});
                     }
                 }
             }
 
-            if (glassInfoActionWindow)
+            POINT point{};
+            bool havePoint = false;
+
+            if (message == WM_LBUTTONUP)
             {
-                POINT point{};
-                bool havePoint = false;
+                point = {
+                    static_cast<short>(LOWORD(lParam)),
+                    static_cast<short>(HIWORD(lParam))};
+                havePoint = true;
+            }
+            else if (LOWORD(lParam) == HTCLIENT &&
+                     GetCursorPos(&point) &&
+                     ScreenToClient(window, &point))
+            {
+                havePoint = true;
+            }
 
-                if (message == WM_LBUTTONUP)
+            if (havePoint && !actionEntries.empty())
+            {
+                HWND glassInfoActionWindow = nullptr;
+                POINT panelPoint = point;
+
+                if (actionEntries.size() == 1)
                 {
-                    point = {
-                        static_cast<short>(LOWORD(lParam)),
-                        static_cast<short>(HIWORD(lParam))};
-                    havePoint = true;
+                    glassInfoActionWindow =
+                        actionEntries.front().infoWindow;
                 }
-                else if (LOWORD(lParam) == HTCLIENT &&
-                         GetCursorPos(&point) &&
-                         ScreenToClient(window, &point))
+                else
                 {
-                    havePoint = true;
+                    for (GlassActionEntry const &entry : actionEntries)
+                    {
+                        int slotTop = 0;
+                        int slotBottom = 0;
+
+                        if (!GetMultiTileSlotBounds(
+                                entry.tile,
+                                window,
+                                &slotTop,
+                                &slotBottom))
+                        {
+                            continue;
+                        }
+
+                        if (point.y >= slotTop &&
+                            point.y < slotBottom)
+                        {
+                            glassInfoActionWindow =
+                                entry.infoWindow;
+
+                            // Existing hit-test rectangles are local to one
+                            // logical info panel, not to the whole host.
+                            panelPoint.y -= slotTop;
+                            break;
+                        }
+                    }
                 }
 
-                if (havePoint)
+                if (glassInfoActionWindow)
                 {
                     RECT cancelRect{};
                     RECT pauseRect{};
@@ -6332,9 +6392,9 @@ namespace
                         previousTransparentPaint;
 
                     bool overCancel =
-                        PtInRect(&cancelRect, point) != FALSE;
+                        PtInRect(&cancelRect, panelPoint) != FALSE;
                     bool overPause =
-                        PtInRect(&pauseRect, point) != FALSE;
+                        PtInRect(&pauseRect, panelPoint) != FALSE;
 
                     if (overCancel || overPause)
                     {
@@ -6486,7 +6546,13 @@ namespace
                         client.bottom - client.top);
                 }
 
-                HWND glassInfoWindow = nullptr;
+                struct GlassInfoPanelPaintEntry
+                {
+                    OperationTileElement *tile = nullptr;
+                    HWND infoWindow = nullptr;
+                };
+
+                std::vector<GlassInfoPanelPaintEntry> glassInfoPanels;
 
                 {
                     std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -6494,35 +6560,74 @@ namespace
                     for (CircleState const &state : g_circles)
                     {
                         if (state.hostWindow == window &&
+                            state.tile &&
                             state.infoWindow &&
                             IsWindow(state.infoWindow))
                         {
-                            glassInfoWindow = state.infoWindow;
-                            break;
+                            glassInfoPanels.push_back(
+                                {state.tile, state.infoWindow});
                         }
                     }
                 }
 
                 bool drewInfoPanel = false;
 
-                if (glassInfoWindow)
+                if (!glassInfoPanels.empty())
                 {
-                    RECT infoClient{};
+                    RECT hostClient{};
 
-                    if (GetClientRect(
-                            window,
-                            &infoClient))
+                    if (GetClientRect(window, &hostClient))
                     {
                         g_glassTransparentInfoPanelPaint = true;
 
-                        DrawInfoPanelFrame(
-                            glassInfoWindow,
-                            bufferDc,
-                            infoClient);
+                        bool multiTile =
+                            glassInfoPanels.size() > 1;
+
+                        for (GlassInfoPanelPaintEntry const &entry :
+                             glassInfoPanels)
+                        {
+                            RECT panelRect = hostClient;
+
+                            if (multiTile)
+                            {
+                                int slotTop = 0;
+                                int slotBottom = 0;
+
+                                if (!GetMultiTileSlotBounds(
+                                        entry.tile,
+                                        window,
+                                        &slotTop,
+                                        &slotBottom))
+                                {
+                                    continue;
+                                }
+
+                                panelRect.top = slotTop;
+                                panelRect.bottom = slotBottom;
+                            }
+
+                            int savedDc = SaveDC(bufferDc);
+
+                            if (savedDc != 0)
+                            {
+                                IntersectClipRect(
+                                    bufferDc,
+                                    panelRect.left,
+                                    panelRect.top,
+                                    panelRect.right,
+                                    panelRect.bottom);
+
+                                DrawInfoPanelFrame(
+                                    entry.infoWindow,
+                                    bufferDc,
+                                    panelRect);
+
+                                RestoreDC(bufferDc, savedDc);
+                                drewInfoPanel = true;
+                            }
+                        }
 
                         g_glassTransparentInfoPanelPaint = false;
-
-                        drewInfoPanel = true;
                     }
                 }
 
@@ -9272,8 +9377,73 @@ namespace
             }
             else
             {
-                ScheduleProgressCirclePosition(state.hostWindow,
-                                               L"tile-removed");
+                // A multi-operation host can keep its old two-row height
+                // after one tile disappears until Explorer performs another
+                // native layout pass. Reapply our verified custom geometry
+                // immediately from the remaining tile state.
+                bool modeKnown = false;
+                bool expanded = false;
+
+                std::vector<OperationTileElement *> remainingTiles;
+                {
+                    std::lock_guard<std::mutex> lock(g_circleMutex);
+
+                    for (CircleState const &remaining : g_circles)
+                    {
+                        if (remaining.hostWindow == state.hostWindow &&
+                            remaining.tile)
+                        {
+                            remainingTiles.push_back(remaining.tile);
+                        }
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(
+                        g_transferSummaryMutex);
+
+                    for (TransferSummaryState const &summary :
+                         g_transferSummaries)
+                    {
+                        if (!summary.tile ||
+                            !summary.displayModeKnown)
+                        {
+                            continue;
+                        }
+
+                        if (std::find(
+                                remainingTiles.begin(),
+                                remainingTiles.end(),
+                                summary.tile) ==
+                            remainingTiles.end())
+                        {
+                            continue;
+                        }
+
+                        modeKnown = true;
+                        expanded = expanded || summary.expanded;
+                    }
+                }
+
+                if (modeKnown &&
+                    GetWindowThreadProcessId(
+                        state.hostWindow,
+                        nullptr) == GetCurrentThreadId())
+                {
+                    ResizeOperationStatusWindowForMode(
+                        state.hostWindow,
+                        expanded,
+                        0);
+                }
+
+                ScheduleProgressCirclePosition(
+                    state.hostWindow,
+                    L"tile-removed");
+
+                InvalidateRect(
+                    state.hostWindow,
+                    nullptr,
+                    FALSE);
             }
         }
     }
