@@ -1,8 +1,8 @@
 // ==WindhawkMod==
-// @id              file-operation-styler-glass-test
-// @name            File Operation Styler Glass Test
+// @id              file-operation-styler
+// @name            File Operation Styler
 // @description     Portable custom presentation for native Explorer file operations with a skin-safe unified presentation.
-// @version         1.0.0
+// @version         1.1.0
 // @author          digART
 // @github          https://github.com/digart11
 // @license         GPL-3.0
@@ -67,7 +67,7 @@ Settings changes apply to new file-operation windows; operations already in prog
     $description: Turn on themes and custom style settings.
   - preset: blueDark
     $name: Theme
-    $description: Choose a theme, then change anything below if you want.
+    $description: Change color theme.
     $options:
     - blueDark: Blue Dark
     - graphite: Graphite
@@ -75,29 +75,33 @@ Settings changes apply to new file-operation windows; operations already in prog
     - warmDark: Warm Dark
     - light: Light
     - system: Windows / System
-    - glass: Glass
-  - glassTint: ""
-    $name: Glass tint
-    #! $format: colorRgb
-    $description: "Optional hex color such as #203040. Leave blank for neutral tint."
-    #! $showIf: {preset: glass}
-  - glassStrength: 0
-    $name: Glass tint strength
-    #! $min: 0     #! $max: 100     #! $format: slider
-    $description: Tint strength from 0 to 100. Zero keeps the normal Glass appearance.
-    #! $showIf: {preset: glass}
+    - glass: Frosted Glass
+
   - footerStyle: glass
-    $name: Footer style
-    $description: Choose whether the footer follows the Glass backdrop or uses the normal theme colors.
+    $name: Footer
+    $description: Frosted Glass footer is available only when the Frosted Glass theme is selected.
     $options:
-    - glass: Glass
+    - glass: Frosted Glass
     - solid: Solid
     #! $showIf: {preset: glass}
+  - footerColorPreset: theme
+    $name: Solid footer color preset
+    $description: Used when Frosted Glass is selected with a Solid footer.
+    $options:
+    - theme: Theme default
+    - blueDark: Blue Dark
+    - graphite: Graphite
+    - midnight: Midnight
+    - warmDark: Warm Dark
+    - light: Light
+    - system: Windows / System
+    - custom: Custom
+    #! $showIf: {preset: glass, footerStyle: solid}
   - footerColor: ""
-    $name: Solid footer color
-    $description: Optional. Leave blank to use the theme background. Accepts #RRGGBB or RRGGBB.
+    $name: Solid footer custom color
+    $description: Used only when Solid footer color preset is Custom. Enter a hex color such as #1C3346.
     #! $format: colorRgb
-    #! $showIf: {footerStyle: solid}
+    #! $showIf: {preset: glass, footerStyle: solid}
   - colors:
     - backgroundOverride: ""
       $name: Background
@@ -149,7 +153,7 @@ Settings changes apply to new file-operation windows; operations already in prog
       $name: Details text size
       $description: Source and destination, items, speed, time, Complete, and footer text.
     - summarySize: 23
-      $name: Transfer total size
+      $name: Summary text size
       $description: The large transferred / total line, for example 1.2 GB / 4.0 GB.
     - percentSize: 26
       $name: Circle percentage size
@@ -183,13 +187,9 @@ Settings changes apply to new file-operation windows; operations already in prog
 #include <string>
 #include <vector>
 
-struct CProgressDialog;
 struct COperationDataProvider;
-struct IOperationDataReader;
-class CTileNotificationsBase;
 struct COperationStatusTile;
 struct COperationStatusTileRateCalculator;
-struct COperationStatusTileCache;
 struct OperationTileElement;
 
 namespace DirectUI
@@ -217,15 +217,14 @@ namespace
                 ole32 = LoadLibraryW(L"ole32.dll");
 
             return ole32
-                ? reinterpret_cast<CoTaskMemFree_t>(
-                      GetProcAddress(ole32, "CoTaskMemFree"))
-                : nullptr;
+                       ? reinterpret_cast<CoTaskMemFree_t>(
+                             GetProcAddress(ole32, "CoTaskMemFree"))
+                       : nullptr;
         }();
 
         if (freeFn)
             freeFn(memory);
     }
-
 
     static_assert(sizeof(void *) == 8);
     static_assert(sizeof(unsigned long) == sizeof(ULONG));
@@ -345,7 +344,6 @@ namespace
         ULONG *deferCookie,
         DirectUI::Element **createdElement);
     DUIXmlParser_CreateElement_t DUIXmlParser_CreateElement_Original;
-
 
     HRESULT __cdecl DUIXmlParser_CreateElement_Hook(
         DirectUI::DUIXmlParser *parser,
@@ -485,25 +483,6 @@ namespace
     COperationDataProvider_WriteProgressValues_t
         COperationDataProvider_WriteProgressValues_Original;
 
-    using CProgressDialog_UpdateLocations_t = HRESULT(__cdecl *)(
-        CProgressDialog *thisPtr,
-        IShellItem *source,
-        IShellItem *destination,
-        IShellItem *currentItem);
-    CProgressDialog_UpdateLocations_t
-        CProgressDialog_UpdateLocations_Original;
-
-    using CProgressDialog_UpdateProgress6_t = HRESULT(__cdecl *)(
-        CProgressDialog *thisPtr,
-        unsigned long long value0,
-        unsigned long long value1,
-        unsigned long long value2,
-        unsigned long long value3,
-        unsigned long long value4,
-        unsigned long long value5);
-    CProgressDialog_UpdateProgress6_t
-        CProgressDialog_UpdateProgress6_Original;
-
     using COperationStatusTile_RefreshDisplayProgress_t = void(__cdecl *)(
         COperationStatusTile *thisPtr,
         unsigned long long value0,
@@ -515,18 +494,6 @@ namespace
         COperationStatusTile *thisPtr,
         PCWSTR summary);
     COperationStatusTile_UpdateSummary_t COperationStatusTile_UpdateSummary_Original;
-
-    using COperationStatusTileCache_GetProgressValues_t = HRESULT(__cdecl *)(
-        COperationStatusTileCache *thisPtr,
-        unsigned long long *value0,
-        unsigned long long *value1,
-        unsigned long long *value2,
-        unsigned long long *value3,
-        unsigned long long *value4,
-        unsigned long long *value5);
-    COperationStatusTileCache_GetProgressValues_t
-        COperationStatusTileCache_GetProgressValues_Original;
-
 
     using COperationStatusTile_SetTileDisplayMode_t = HRESULT(__cdecl *)(
         COperationStatusTile *thisPtr,
@@ -595,7 +562,6 @@ namespace
 
     struct OperationDataBinding
     {
-        COperationStatusTile *owner = nullptr;
         COperationDataProvider *writer = nullptr;
 
         unsigned long long latestCompletedItems = 0;
@@ -603,7 +569,6 @@ namespace
         unsigned long long latestCompletedBytes = 0;
         unsigned long long latestTotalBytes = 0;
         bool latestProgressValid = false;
-
 
         unsigned long long currentFileSize = 0;
         unsigned long long currentFileStartBytes = 0;
@@ -678,6 +643,21 @@ namespace
         g_sharedProgressMapping = mapping;
         g_sharedProgressTable = table;
         return true;
+    }
+
+    void ShutdownSharedProgressBridge()
+    {
+        if (g_sharedProgressTable)
+        {
+            UnmapViewOfFile(g_sharedProgressTable);
+            g_sharedProgressTable = nullptr;
+        }
+
+        if (g_sharedProgressMapping)
+        {
+            CloseHandle(g_sharedProgressMapping);
+            g_sharedProgressMapping = nullptr;
+        }
     }
 
     int EnsureSharedProgressSlot(
@@ -786,6 +766,58 @@ namespace
 
         MemoryBarrier();
         InterlockedIncrement(&slot.sequence);
+    }
+
+    void ClearOperationDataBindingsLocked()
+    {
+        if (g_sharedProgressTable)
+        {
+            DWORD pid = GetCurrentProcessId();
+
+            for (OperationDataBinding const &binding :
+                 g_operationDataBindings)
+            {
+                if (!binding.writer ||
+                    binding.sharedSlot < 0 ||
+                    binding.sharedSlot >= kSharedProgressSlotCount)
+                {
+                    continue;
+                }
+
+                auto &slot =
+                    g_sharedProgressTable->slots[binding.sharedSlot];
+
+                unsigned long long writerKey =
+                    reinterpret_cast<unsigned long long>(
+                        binding.writer);
+
+                if (static_cast<DWORD>(slot.ownerPid) != pid ||
+                    slot.writerKey != writerKey)
+                {
+                    continue;
+                }
+
+                InterlockedIncrement(&slot.sequence);
+
+                slot.writerKey = 0;
+                slot.completedItems = 0;
+                slot.totalItems = 0;
+                slot.completedBytes = 0;
+                slot.totalBytes = 0;
+                slot.currentFileSize = 0;
+                slot.currentFileStartBytes = 0;
+                slot.currentFileValid = FALSE;
+                slot.updateTick = 0;
+
+                MemoryBarrier();
+                InterlockedIncrement(&slot.sequence);
+
+                // Release ownership only after the slot contents are stable.
+                InterlockedExchange(&slot.ownerPid, 0);
+            }
+        }
+
+        g_operationDataBindings.clear();
     }
 
     thread_local COperationStatusTile *g_nativeRateOwnerHint = nullptr;
@@ -897,6 +929,7 @@ namespace
         COLORREF glassTint = RGB(0, 0, 0);
         int glassStrength = 0;
         std::wstring footerStyle = L"glass";
+        std::wstring footerColorPreset = L"theme";
         COLORREF footerColor = RGB(0, 0, 0);
         bool customFooterColor = false;
     };
@@ -1246,19 +1279,11 @@ namespace
 
         g_settings.theme = MakePresetTheme(g_settings.preset);
 
-        std::wstring glassTintValue =
-            GetStringSettingValue(
-                L"customization.glassTint");
-
-        COLORREF parsedGlassTint{};
-        if (ParseColorValue(glassTintValue, &parsedGlassTint))
-        {
-            g_settings.glassTint = parsedGlassTint;
-        }
-
-        g_settings.glassStrength =
-            GetClampedIntSetting(
-                L"customization.glassStrength", 0, 100);
+        // Glass tint support is intentionally retained internally but is not
+        // currently exposed. Keep the public Glass preset neutral so the native
+        // title area and custom client area remain visually consistent.
+        g_settings.glassTint = RGB(0, 0, 0);
+        g_settings.glassStrength = 0;
 
         g_settings.footerStyle =
             GetStringSettingValue(
@@ -1269,11 +1294,42 @@ namespace
             g_settings.footerStyle = L"glass";
         }
 
-        g_settings.customFooterColor =
-            ParseColorValue(
-                GetStringSettingValue(
-                    L"customization.footerColor"),
-                &g_settings.footerColor);
+        g_settings.footerColorPreset =
+            GetStringSettingValue(
+                L"customization.footerColorPreset");
+
+        if (g_settings.footerColorPreset.empty())
+        {
+            g_settings.footerColorPreset = L"theme";
+        }
+
+        g_settings.customFooterColor = false;
+
+        if (g_settings.footerColorPreset == L"custom")
+        {
+            g_settings.customFooterColor =
+                ParseColorValue(
+                    GetStringSettingValue(
+                        L"customization.footerColor"),
+                    &g_settings.footerColor);
+        }
+        else if (g_settings.footerColorPreset == L"blueDark" ||
+                 g_settings.footerColorPreset == L"graphite" ||
+                 g_settings.footerColorPreset == L"midnight" ||
+                 g_settings.footerColorPreset == L"warmDark" ||
+                 g_settings.footerColorPreset == L"light" ||
+                 g_settings.footerColorPreset == L"system")
+        {
+            ThemePalette footerTheme =
+                MakePresetTheme(g_settings.footerColorPreset);
+
+            g_settings.footerColor = footerTheme.background;
+            g_settings.customFooterColor = true;
+        }
+        else
+        {
+            g_settings.footerColorPreset = L"theme";
+        }
         bool anyColorOverride = false;
 
         bool customBackground = ApplyColorOverride(
@@ -1556,11 +1612,13 @@ namespace
                 hostWindow,
                 &margins);
 
-        Wh_Log(
-            L"Glass test: ExtendFrame fullClient=%s result=0x%08X hwnd=%p",
-            enabled ? L"yes" : L"no",
-            static_cast<unsigned int>(result),
-            reinterpret_cast<void *>(hostWindow));
+        if (FAILED(result))
+        {
+            Wh_Log(
+                L"Glass: ExtendFrame failed result=0x%08X hwnd=%p",
+                static_cast<unsigned int>(result),
+                reinterpret_cast<void *>(hostWindow));
+        }
     }
 
     void ApplyUnifiedHostChrome(HWND hostWindow)
@@ -1584,10 +1642,13 @@ namespace
                 &backdropType,
                 sizeof(backdropType));
 
-        Wh_Log(
-            L"Glass test: SYSTEMBACKDROP_TYPE result=0x%08X hwnd=%p",
-            static_cast<unsigned int>(backdropResult),
-            reinterpret_cast<void *>(hostWindow));
+        if (FAILED(backdropResult))
+        {
+            Wh_Log(
+                L"Glass: SYSTEMBACKDROP_TYPE failed result=0x%08X hwnd=%p",
+                static_cast<unsigned int>(backdropResult),
+                reinterpret_cast<void *>(hostWindow));
+        }
 
         SetGlassClientFrameExtension(hostWindow, true);
 
@@ -2620,7 +2681,6 @@ namespace
                 stateCopy.operationTileRoot, stateCopy.tileHeaderRoot,
                 L"eltItemName", false);
             snapshot->currentItemName = ReadDirectUiText(currentItem);
-
         }
         return true;
     }
@@ -2910,9 +2970,7 @@ namespace
         graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
         graphics.SetTextRenderingHint(
-            g_glassTransparentInfoPanelPaint
-                ? Gdiplus::TextRenderingHintAntiAliasGridFit
-                : Gdiplus::TextRenderingHintClearTypeGridFit);
+            Gdiplus::TextRenderingHintClearTypeGridFit);
 
         Gdiplus::SolidBrush backgroundBrush(Gdiplus::Color(
             255, GetRValue(theme.background), GetGValue(theme.background),
@@ -2926,7 +2984,6 @@ namespace
                 width,
                 height);
         }
-
 
         DrawEmbeddedProgressCircle(
             graphics, dpi, snapshot.displayedOverallPercent, theme, type);
@@ -2956,9 +3013,12 @@ namespace
         Gdiplus::SolidBrush primaryBrush(Gdiplus::Color(
             255, GetRValue(theme.primaryText), GetGValue(theme.primaryText),
             GetBValue(theme.primaryText)));
+        COLORREF infoSecondaryText =
+            IsGlassTheme() ? RGB(184, 202, 218) : theme.secondaryText;
+
         Gdiplus::SolidBrush secondaryBrush(Gdiplus::Color(
-            255, GetRValue(theme.secondaryText),
-            GetGValue(theme.secondaryText), GetBValue(theme.secondaryText)));
+            255, GetRValue(infoSecondaryText),
+            GetGValue(infoSecondaryText), GetBValue(infoSecondaryText)));
         Gdiplus::SolidBrush linkBrush(Gdiplus::Color(
             255, GetRValue(theme.accent),
             GetGValue(theme.accent), GetBValue(theme.accent)));
@@ -3600,14 +3660,20 @@ namespace
                               static_cast<Gdiplus::REAL>(chartWidth),
                               referenceY);
 
+            int graphValueSize =
+                type.graphValueSize + (IsGlassTheme() ? 1 : 0);
+            Gdiplus::FontStyle graphValueStyle =
+                IsGlassTheme() ? Gdiplus::FontStyleBold
+                               : Gdiplus::FontStyleRegular;
+
             Gdiplus::Font graphValueFont(
                 type.bodyFont.c_str(),
-                static_cast<Gdiplus::REAL>(ScaleForDpi(type.graphValueSize, dpi)),
-                Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                static_cast<Gdiplus::REAL>(ScaleForDpi(graphValueSize, dpi)),
+                graphValueStyle, Gdiplus::UnitPixel);
             Gdiplus::Font graphValueFallback(
                 L"Segoe UI",
-                static_cast<Gdiplus::REAL>(ScaleForDpi(type.graphValueSize, dpi)),
-                Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                static_cast<Gdiplus::REAL>(ScaleForDpi(graphValueSize, dpi)),
+                graphValueStyle, Gdiplus::UnitPixel);
             Gdiplus::Font *selectedGraphValueFont =
                 graphValueFont.GetLastStatus() == Gdiplus::Ok
                     ? &graphValueFont
@@ -4227,7 +4293,12 @@ namespace
                                 0.0L, 100.0L));
                 }
 
-                if (it->bytesValid &&
+                // Copy/Move overall progress follows transferred bytes.
+                // Delete/Recycle must keep Explorer's native overall percent:
+                // its byte accounting can reach the total before the actual
+                // delete operation has finished.
+                if (!(it->deleteLikeKnown && it->deleteLike) &&
+                    it->bytesValid &&
                     it->totalBytes > 0)
                 {
                     long double rawOverallTarget =
@@ -4560,12 +4631,14 @@ namespace
         Gdiplus::Graphics graphics(deviceContext);
         graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         graphics.SetTextRenderingHint(
-            glassHostPaint
-                ? Gdiplus::TextRenderingHintAntiAliasGridFit
-                : Gdiplus::TextRenderingHintClearTypeGridFit);
+            Gdiplus::TextRenderingHintClearTypeGridFit);
 
         COLORREF footerBackground = theme.background;
-        if (!glassHostPaint && g_settings.customFooterColor)
+        if (!glassHostPaint &&
+            g_settings.customizationEnabled &&
+            g_settings.preset == L"glass" &&
+            g_settings.footerStyle == L"solid" &&
+            g_settings.customFooterColor)
         {
             footerBackground = g_settings.footerColor;
         }
@@ -4591,10 +4664,13 @@ namespace
                 ? &footerFont
                 : &footerFallback;
 
+        COLORREF footerSecondaryText =
+            IsGlassTheme() ? RGB(184, 202, 218) : theme.secondaryText;
+
         Gdiplus::SolidBrush secondaryBrush(Gdiplus::Color(
-            255, GetRValue(theme.secondaryText),
-            GetGValue(theme.secondaryText),
-            GetBValue(theme.secondaryText)));
+            255, GetRValue(footerSecondaryText),
+            GetGValue(footerSecondaryText),
+            GetBValue(footerSecondaryText)));
         Gdiplus::SolidBrush actionTextBrush(Gdiplus::Color(
             255, GetRValue(theme.actionText),
             GetGValue(theme.actionText), GetBValue(theme.actionText)));
@@ -4608,9 +4684,9 @@ namespace
         Gdiplus::REAL rise =
             static_cast<Gdiplus::REAL>(ScaleForDpi(3, dpi));
         Gdiplus::Pen chevronPen(Gdiplus::Color(
-                                    255, GetRValue(theme.secondaryText),
-                                    GetGValue(theme.secondaryText),
-                                    GetBValue(theme.secondaryText)),
+                                    255, GetRValue(footerSecondaryText),
+                                    GetGValue(footerSecondaryText),
+                                    GetBValue(footerSecondaryText)),
                                 1.0f);
 
         if (snapshot.expanded)
@@ -4657,10 +4733,12 @@ namespace
                 255, GetRValue(theme.actionSurface),
                 GetGValue(theme.actionSurface),
                 GetBValue(theme.actionSurface)));
+            COLORREF buttonBorderColor =
+                IsGlassTheme() ? RGB(92, 121, 145) : theme.actionBorder;
             Gdiplus::Pen buttonBorder(Gdiplus::Color(
-                                          255, GetRValue(theme.actionBorder),
-                                          GetGValue(theme.actionBorder),
-                                          GetBValue(theme.actionBorder)),
+                                          255, GetRValue(buttonBorderColor),
+                                          GetGValue(buttonBorderColor),
+                                          GetBValue(buttonBorderColor)),
                                       1.0f);
             graphics.FillRectangle(&buttonBrush, buttonBounds);
             graphics.DrawRectangle(&buttonBorder, buttonBounds);
@@ -5621,7 +5699,6 @@ namespace
 
     void RestoreGlassDirectUiForHost(HWND hostWindow);
 
-
     void HideCustomPresentationForHost(HWND hostWindow)
     {
         // Special Explorer states must temporarily leave the
@@ -5952,10 +6029,17 @@ namespace
         SetAlpha_t setAlpha = nullptr;
     };
 
+    GlassBufferedPaintApi g_glassBufferedPaintApi{};
+    bool g_glassBufferedPaintApiInitialized = false;
+    HMODULE g_ownedGlassBufferedPaintModule = nullptr;
+    std::mutex g_glassBufferedPaintApiMutex;
+
     GlassBufferedPaintApi *GetGlassBufferedPaintApi()
     {
-        static GlassBufferedPaintApi api{};
-        static bool initialized = false;
+        std::lock_guard<std::mutex> lock(g_glassBufferedPaintApiMutex);
+
+        GlassBufferedPaintApi &api = g_glassBufferedPaintApi;
+        bool &initialized = g_glassBufferedPaintApiInitialized;
 
         if (!initialized)
         {
@@ -5968,6 +6052,11 @@ namespace
             {
                 api.module =
                     LoadLibraryW(L"uxtheme.dll");
+
+                if (api.module)
+                {
+                    g_ownedGlassBufferedPaintModule = api.module;
+                }
             }
 
             if (api.module)
@@ -6016,7 +6105,19 @@ namespace
         return &api;
     }
 
-    // GLASS_LIFECYCLE_RESTORED
+    void ShutdownGlassBufferedPaintApi()
+    {
+        std::lock_guard<std::mutex> lock(g_glassBufferedPaintApiMutex);
+
+        g_glassBufferedPaintApi = {};
+        g_glassBufferedPaintApiInitialized = false;
+
+        if (g_ownedGlassBufferedPaintModule)
+        {
+            FreeLibrary(g_ownedGlassBufferedPaintModule);
+            g_ownedGlassBufferedPaintModule = nullptr;
+        }
+    }
 
     void RestoreGlassDirectUiForHost(HWND hostWindow)
     {
@@ -6035,9 +6136,6 @@ namespace
         {
             if (!IsWindowVisible(directUi))
             {
-                Wh_Log(
-                    L"Glass teardown: restoring DirectUIHWND hwnd=%p",
-                    reinterpret_cast<void *>(directUi));
 
                 ShowWindow(
                     directUi,
@@ -6173,7 +6271,7 @@ namespace
         if (g_removeHostSubclassMessage &&
             message == g_removeHostSubclassMessage)
         {
-            // Restore anything hidden only for the Acrylic experiment.
+            // Restore anything hidden by the custom Glass presentation.
             RestoreGlassDirectUiForHost(window);
 
             // Restore Explorer's own normal presentation.
@@ -6436,9 +6534,6 @@ namespace
         if (message == WM_PAINT &&
             IsGlassTheme())
         {
-            Wh_Log(
-                L"Glass test: host buffered WM_PAINT hwnd=%p",
-                reinterpret_cast<void *>(window));
 
             // Native conflict/permission/file-in-use pages own the
             // host while Explorer is in a special operation state.
@@ -6448,25 +6543,6 @@ namespace
                     window, message, wParam, lParam);
             }
 
-            // Normal glass mode owns the visible presentation.
-            // Hide DirectUI whenever Explorer has made it visible
-            // again, including after returning from a special state.
-            HWND directUi = nullptr;
-            while ((directUi = FindWindowExW(
-                        window,
-                        directUi,
-                        L"DirectUIHWND",
-                        nullptr)) != nullptr)
-            {
-                if (IsWindowVisible(directUi))
-                {
-                    Wh_Log(
-                        L"Glass normal state: hiding DirectUIHWND hwnd=%p",
-                        reinterpret_cast<void *>(directUi));
-
-                    ShowWindow(directUi, SW_HIDE);
-                }
-            }
 
             PAINTSTRUCT paint{};
             HDC paintDc = BeginPaint(window, &paint);
@@ -6489,18 +6565,26 @@ namespace
             if (!bp)
             {
                 Wh_Log(
-                    L"Glass test: buffered-paint API unavailable");
+                    L"Glass: buffered-paint API unavailable");
 
                 EndPaint(window, &paint);
+                RestoreGlassDirectUiForHost(window);
                 return 0;
             }
 
             HRESULT initResult =
                 bp->init();
 
-            Wh_Log(
-                L"Glass test: BufferedPaintInit result=0x%08X",
-                static_cast<unsigned int>(initResult));
+            if (FAILED(initResult))
+            {
+                Wh_Log(
+                    L"Glass: BufferedPaintInit failed result=0x%08X",
+                    static_cast<unsigned int>(initResult));
+
+                EndPaint(window, &paint);
+                RestoreGlassDirectUiForHost(window);
+                return 0;
+            }
 
             BP_PAINTPARAMS params{};
             params.cbSize = sizeof(params);
@@ -6516,12 +6600,37 @@ namespace
                     &params,
                     &bufferDc);
 
-            Wh_Log(
-                L"Glass test: BeginBufferedPaint buffer=%p dc=%p",
-                reinterpret_cast<void *>(buffer),
-                reinterpret_cast<void *>(bufferDc));
+            if (!buffer || !bufferDc)
+            {
+                Wh_Log(L"Glass: BeginBufferedPaint failed");
 
-            if (buffer && bufferDc)
+                if (buffer)
+                {
+                    bp->end(buffer, FALSE);
+                }
+
+                bp->uninit();
+                EndPaint(window, &paint);
+                RestoreGlassDirectUiForHost(window);
+                return 0;
+            }
+
+            // The custom paint surface is ready. Only now hide Explorer's
+            // native DirectUI presentation so a paint failure can always
+            // fall back to usable native content.
+            HWND directUi = nullptr;
+            while ((directUi = FindWindowExW(
+                        window,
+                        directUi,
+                        L"DirectUIHWND",
+                        nullptr)) != nullptr)
+            {
+                if (IsWindowVisible(directUi))
+                {
+                    ShowWindow(directUi, SW_HIDE);
+                }
+            }
+
             {
                 if (g_settings.glassStrength > 0)
                 {
@@ -6640,9 +6749,6 @@ namespace
 
                 DrawGlassHostFooter(window, bufferDc);
 
-                Wh_Log(
-                    L"Glass test: full info panel drawn=%d",
-                    drewInfoPanel ? 1 : 0);
                 bp->end(
                     buffer,
                     TRUE);
@@ -7625,8 +7731,22 @@ namespace
         // strings instead of inferring meaning from machine-dependent bounds.
         bool firstPresent = !ReadDirectUiText(firstLocation).empty();
         bool secondPresent = !ReadDirectUiText(secondLocation).empty();
+
         if (!firstPresent && !secondPresent)
         {
+            // Empty Recycle Bin can expose neither location string while
+            // Explorer is still discovering the recycle-bin contents.
+            // During that phase the discovered item/byte totals grow while
+            // completed work remains zero.
+            if (state.itemsValid &&
+                state.bytesValid &&
+                state.totalItems > 0 &&
+                state.totalBytes > 0)
+            {
+                *deleteLike = true;
+                return true;
+            }
+
             return false;
         }
 
@@ -7931,6 +8051,11 @@ namespace
                 [tile](TransferSummaryState const &state)
                 { return state.tile == tile; }),
             g_transferSummaries.end());
+
+        if (g_transferSummaries.empty())
+        {
+            ClearOperationDataBindingsLocked();
+        }
     }
 
     void ApplyTransferSummary(COperationStatusTile *owner)
@@ -8727,10 +8852,11 @@ namespace
 
         if (!nativeCompact && !nativeExpanded)
         {
-            Wh_Log(L"INITIAL_MODE owner=%p result=skipped "
-                   L"reason=unrecognized-native-visibility deleteLike=%s",
-                   reinterpret_cast<void *>(owner),
-                   deleteLike ? L"yes" : L"no");
+            Wh_Log(
+                L"INITIAL_MODE owner=%p result=skipped "
+                L"reason=unrecognized-native-visibility deleteLike=%s",
+                reinterpret_cast<void *>(owner),
+                deleteLike ? L"yes" : L"no");
             return;
         }
 
@@ -8804,6 +8930,8 @@ namespace
             {
                 ULONGLONG readNow = GetTickCount64();
                 bool foundSharedCurrentFile = false;
+                bool ambiguousSharedCurrentFile = false;
+                unsigned long long bestItemDistance = ~0ULL;
                 unsigned long long bestByteDistance = ~0ULL;
                 unsigned long long bestFileSize = 0;
                 unsigned long long bestFileStartBytes = 0;
@@ -8860,23 +8988,47 @@ namespace
                         continue;
                     }
 
+                    unsigned long long itemDistance =
+                        sharedCompletedItems >= completedItems
+                            ? sharedCompletedItems - completedItems
+                            : completedItems - sharedCompletedItems;
+
                     unsigned long long byteDistance =
                         sharedCompletedBytes >= completedBytes
                             ? sharedCompletedBytes - completedBytes
                             : completedBytes - sharedCompletedBytes;
 
-                    if (!foundSharedCurrentFile ||
-                        byteDistance < bestByteDistance)
+                    bool betterCandidate =
+                        !foundSharedCurrentFile ||
+                        itemDistance < bestItemDistance ||
+                        (itemDistance == bestItemDistance &&
+                         byteDistance < bestByteDistance);
+
+                    bool equalCandidate =
+                        foundSharedCurrentFile &&
+                        itemDistance == bestItemDistance &&
+                        byteDistance == bestByteDistance;
+
+                    if (betterCandidate)
                     {
                         foundSharedCurrentFile = true;
+                        ambiguousSharedCurrentFile = false;
+                        bestItemDistance = itemDistance;
                         bestByteDistance = byteDistance;
                         bestFileSize = sharedFileSize;
                         bestFileStartBytes =
                             sharedFileStartBytes;
                     }
+                    else if (equalCandidate &&
+                             (sharedFileSize != bestFileSize ||
+                              sharedFileStartBytes != bestFileStartBytes))
+                    {
+                        ambiguousSharedCurrentFile = true;
+                    }
                 }
 
-                if (foundSharedCurrentFile)
+                if (foundSharedCurrentFile &&
+                    !ambiguousSharedCurrentFile)
                 {
                     it->currentFileSize = bestFileSize;
                     it->currentFileStartBytes =
@@ -8911,8 +9063,15 @@ namespace
                                 currentRawPercent,
                                 0.0L,
                                 100.0L));
-
                 }
+                else
+                {
+                    it->currentFileProgressValid = false;
+                }
+            }
+            else
+            {
+                it->currentFileProgressValid = false;
             }
 
             bool deleteLike = it->deleteLikeKnown && it->deleteLike;
@@ -9022,20 +9181,7 @@ namespace
             it->totalBytes = totalBytes;
             it->bytesValid = true;
 
-            if (totalBytes > 0)
-            {
-                long double rawPercent =
-                    static_cast<long double>(completedBytes) * 100.0L /
-                    static_cast<long double>(totalBytes);
 
-                int bytePercent =
-                    static_cast<int>(
-                        std::clamp<long double>(
-                            rawPercent,
-                            0.0L,
-                            100.0L));
-
-            }
             tile = it->tile;
         }
 
@@ -9066,9 +9212,34 @@ namespace
                 owner = it->owner;
             }
         }
-        if (owner)
+
+        if (!owner)
         {
-            ApplyTransferSummary(owner);
+            return;
+        }
+
+        ApplyTransferSummary(owner);
+
+        // Some operations, notably Empty Recycle Bin, register their tile
+        // before Explorer has populated the native description/visibility
+        // state. Retry classification and initial display-mode discovery on
+        // later native progress updates instead of permanently giving up on
+        // the first all-hidden transitional frame.
+        TransferSummaryState state{};
+        if (!CopyRegisteredTransferState(owner, &state) ||
+            !state.tile ||
+            !state.operationTileRoot)
+        {
+            return;
+        }
+
+        RefreshDeleteLikeOperationKind(owner, state);
+
+        TransferSummaryState refreshedState{};
+        if (CopyRegisteredTransferState(owner, &refreshedState) &&
+            !refreshedState.displayModeKnown)
+        {
+            InitializeRegisteredDisplayMode(owner);
         }
     }
 
@@ -9792,6 +9963,37 @@ namespace
         UpdateProgressCircle(thisPtr);
     }
 
+    void RetryPendingInitialDisplayMode(COperationStatusTile *owner)
+    {
+        if (!owner ||
+            g_unloading.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        TransferSummaryState state{};
+        if (!CopyRegisteredTransferState(owner, &state) ||
+            !state.tile ||
+            !state.operationTileRoot ||
+            state.displayModeKnown)
+        {
+            return;
+        }
+
+        // Empty Recycle Bin can create/register the tile while its native
+        // description and visibility state are still empty. Native tile
+        // updates arrive later, so retry classification and initialization
+        // only while the initial display mode is still unresolved.
+        RefreshDeleteLikeOperationKind(owner, state);
+
+        TransferSummaryState refreshedState{};
+        if (CopyRegisteredTransferState(owner, &refreshedState) &&
+            !refreshedState.displayModeKnown)
+        {
+            InitializeRegisteredDisplayMode(owner);
+        }
+    }
+
     HRESULT __cdecl COperationStatusTile_UpdateRemainingItemsAndSize_Hook(
         COperationStatusTile *thisPtr,
         unsigned long long completedItems,
@@ -9812,10 +10014,10 @@ namespace
         {
             RecordTransferBytes(thisPtr, completedItems, totalItems,
                                 completedBytes, totalBytes);
+            RetryPendingInitialDisplayMode(thisPtr);
         }
         return result;
     }
-
 
     HRESULT __cdecl COperationDataProvider_WriteCurrentItem_Hook(
         COperationDataProvider *thisPtr,
@@ -9833,17 +10035,11 @@ namespace
         if (!g_unloading.load(std::memory_order_acquire))
         {
             PWSTR filePath = nullptr;
-            PWSTR displayName = nullptr;
 
             HRESULT pathHr = currentItem
-                ? currentItem->GetDisplayName(
-                      SIGDN_FILESYSPATH, &filePath)
-                : E_POINTER;
-
-            HRESULT nameHr = currentItem
-                ? currentItem->GetDisplayName(
-                      SIGDN_NORMALDISPLAY, &displayName)
-                : E_POINTER;
+                                 ? currentItem->GetDisplayName(
+                                       SIGDN_FILESYSPATH, &filePath)
+                                 : E_POINTER;
 
             unsigned long long fileSize = 0;
             BOOL fileExists = FALSE;
@@ -9859,14 +10055,13 @@ namespace
                 {
                     fileSize =
                         (static_cast<unsigned long long>(
-                             data.nFileSizeHigh) << 32) |
+                             data.nFileSizeHigh)
+                         << 32) |
                         static_cast<unsigned long long>(
                             data.nFileSizeLow);
                 }
             }
 
-            COperationStatusTile *boundOwner = nullptr;
-            OperationTileElement *boundTile = nullptr;
 
             {
                 std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
@@ -9907,43 +10102,16 @@ namespace
                 binding->currentFileValid = fileSize > 0;
                 PublishSharedProgress(*binding);
 
-                boundOwner = binding->owner;
-
-                if (boundOwner)
-                {
-                    auto state = std::find_if(
-                        g_transferSummaries.begin(),
-                        g_transferSummaries.end(),
-                        [boundOwner](TransferSummaryState const &entry)
-                        { return entry.owner == boundOwner; });
-
-                    if (state != g_transferSummaries.end())
-                    {
-                        state->currentFileSize = fileSize;
-                        state->currentFileStartBytes = baseline;
-                        state->currentFileCompletedBytes = 0;
-                        state->currentFilePercent = 0;
-                        state->currentFileProgressValid = fileSize > 0;
-                        boundTile = state->tile;
-                    }
-                }
 
             }
 
-            if (boundTile)
-            {
-                InvalidateInfoPanelForTile(boundTile);
-            }
 
             if (filePath)
             {
                 FreeShellMemory(filePath);
             }
 
-            if (displayName)
-            {
-                FreeShellMemory(displayName);
-            }
+
         }
 
         if (currentItem)
@@ -9963,37 +10131,7 @@ namespace
         unsigned long long value4,
         unsigned long long value5)
     {
-        static thread_local COperationDataProvider *lastThis = nullptr;
-        static thread_local unsigned long long last[6]{};
-        static thread_local bool initialized = false;
 
-        if (!g_unloading.load(std::memory_order_acquire))
-        {
-            bool changed =
-                !initialized ||
-                lastThis != thisPtr ||
-                last[0] != value0 ||
-                last[1] != value1 ||
-                last[2] != value2 ||
-                last[3] != value3 ||
-                last[4] != value4 ||
-                last[5] != value5;
-
-            if (changed)
-            {
-
-                lastThis = thisPtr;
-                last[0] = value0;
-                last[1] = value1;
-                last[2] = value2;
-                last[3] = value3;
-                last[4] = value4;
-                last[5] = value5;
-                initialized = true;
-            }
-        }
-
-        OperationTileElement *currentFileTile = nullptr;
 
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
@@ -10019,160 +10157,10 @@ namespace
             binding->latestProgressValid = true;
             PublishSharedProgress(*binding);
 
-            if (binding->owner &&
-                binding->currentFileValid &&
-                binding->currentFileSize > 0 &&
-                value4 >= binding->currentFileStartBytes)
-            {
-                auto state = std::find_if(
-                    g_transferSummaries.begin(),
-                    g_transferSummaries.end(),
-                    [binding](TransferSummaryState const &entry)
-                    { return entry.owner == binding->owner; });
-
-                if (state != g_transferSummaries.end())
-                {
-                    unsigned long long copied =
-                        value4 - binding->currentFileStartBytes;
-
-                    copied = std::min(
-                        copied, binding->currentFileSize);
-
-                    state->currentFileSize =
-                        binding->currentFileSize;
-                    state->currentFileStartBytes =
-                        binding->currentFileStartBytes;
-                    state->currentFileCompletedBytes = copied;
-                    state->currentFileProgressValid = true;
-
-                    long double rawPercent =
-                        static_cast<long double>(copied) * 100.0L /
-                        static_cast<long double>(
-                            binding->currentFileSize);
-
-                    state->currentFilePercent =
-                        static_cast<int>(
-                            std::clamp<long double>(
-                                rawPercent, 0.0L, 100.0L));
-
-                    currentFileTile = state->tile;
-                }
-            }
         }
 
-        if (currentFileTile)
-        {
-            InvalidateInfoPanelForTile(currentFileTile);
-        }
 
         return COperationDataProvider_WriteProgressValues_Original(
-            thisPtr,
-            value0, value1, value2,
-            value3, value4, value5);
-    }
-
-    HRESULT __cdecl CProgressDialog_UpdateLocations_Hook(
-        CProgressDialog *thisPtr,
-        IShellItem *source,
-        IShellItem *destination,
-        IShellItem *currentItem)
-    {
-        if (currentItem)
-        {
-            currentItem->AddRef();
-        }
-
-        HRESULT result = CProgressDialog_UpdateLocations_Original(
-            thisPtr, source, destination, currentItem);
-
-        if (!g_unloading.load(std::memory_order_acquire))
-        {
-            PWSTR currentPath = nullptr;
-            PWSTR currentName = nullptr;
-
-            HRESULT pathHr = currentItem
-                ? currentItem->GetDisplayName(
-                      SIGDN_FILESYSPATH, &currentPath)
-                : E_POINTER;
-
-            HRESULT nameHr = currentItem
-                ? currentItem->GetDisplayName(
-                      SIGDN_NORMALDISPLAY, &currentName)
-                : E_POINTER;
-
-            Wh_Log(
-                L"PD_LOCATION this=%p current=%p path='%s' name='%s' pathHr=0x%08X result=0x%08X",
-                reinterpret_cast<void *>(thisPtr),
-                reinterpret_cast<void *>(currentItem),
-                SUCCEEDED(pathHr) && currentPath ? currentPath : L"",
-                SUCCEEDED(nameHr) && currentName ? currentName : L"",
-                static_cast<unsigned int>(pathHr),
-                static_cast<unsigned int>(result));
-
-            if (currentPath)
-            {
-                FreeShellMemory(currentPath);
-            }
-
-            if (currentName)
-            {
-                FreeShellMemory(currentName);
-            }
-        }
-
-        if (currentItem)
-        {
-            currentItem->Release();
-        }
-
-        return result;
-    }
-
-    HRESULT __cdecl CProgressDialog_UpdateProgress6_Hook(
-        CProgressDialog *thisPtr,
-        unsigned long long value0,
-        unsigned long long value1,
-        unsigned long long value2,
-        unsigned long long value3,
-        unsigned long long value4,
-        unsigned long long value5)
-    {
-        static thread_local CProgressDialog *lastThis = nullptr;
-        static thread_local unsigned long long last[6]{};
-        static thread_local bool initialized = false;
-
-        if (!g_unloading.load(std::memory_order_acquire))
-        {
-            bool changed =
-                !initialized ||
-                lastThis != thisPtr ||
-                last[0] != value0 ||
-                last[1] != value1 ||
-                last[2] != value2 ||
-                last[3] != value3 ||
-                last[4] != value4 ||
-                last[5] != value5;
-
-            if (changed)
-            {
-                Wh_Log(
-                    L"PD_PROGRESS this=%p V0=%llu V1=%llu V2=%llu V3=%llu V4=%llu V5=%llu",
-                    reinterpret_cast<void *>(thisPtr),
-                    value0, value1, value2,
-                    value3, value4, value5);
-
-                lastThis = thisPtr;
-                last[0] = value0;
-                last[1] = value1;
-                last[2] = value2;
-                last[3] = value3;
-                last[4] = value4;
-                last[5] = value5;
-                initialized = true;
-            }
-        }
-
-        return CProgressDialog_UpdateProgress6_Original(
             thisPtr,
             value0, value1, value2,
             value3, value4, value5);
@@ -10183,70 +10171,11 @@ namespace
         unsigned long long value0,
         unsigned long long value1)
     {
-        static thread_local bool initialized = false;
-        static thread_local unsigned long long last0 = 0;
-        static thread_local unsigned long long last1 = 0;
-
-        if (!g_unloading.load(std::memory_order_acquire) &&
-            (!initialized || value0 != last0 || value1 != last1))
-        {
-
-            last0 = value0;
-            last1 = value1;
-            initialized = true;
-        }
 
         COperationStatusTile_RefreshDisplayProgress_Original(
             thisPtr, value0, value1);
-    }
 
-    HRESULT __cdecl COperationStatusTileCache_GetProgressValues_Hook(
-        COperationStatusTileCache *thisPtr,
-        unsigned long long *value0,
-        unsigned long long *value1,
-        unsigned long long *value2,
-        unsigned long long *value3,
-        unsigned long long *value4,
-        unsigned long long *value5)
-    {
-        HRESULT result =
-            COperationStatusTileCache_GetProgressValues_Original(
-                thisPtr, value0, value1, value2,
-                value3, value4, value5);
-
-        if (!g_unloading.load(std::memory_order_acquire) &&
-            SUCCEEDED(result))
-        {
-            unsigned long long p0 = value0 ? *value0 : ~0ULL;
-            unsigned long long p1 = value1 ? *value1 : ~0ULL;
-            unsigned long long p2 = value2 ? *value2 : ~0ULL;
-            unsigned long long p3 = value3 ? *value3 : ~0ULL;
-            unsigned long long p4 = value4 ? *value4 : ~0ULL;
-            unsigned long long p5 = value5 ? *value5 : ~0ULL;
-
-            static thread_local bool initialized = false;
-            static thread_local unsigned long long last[6]{};
-
-            bool changed =
-                !initialized ||
-                last[0] != p0 || last[1] != p1 ||
-                last[2] != p2 || last[3] != p3 ||
-                last[4] != p4 || last[5] != p5;
-
-            if (changed)
-            {
-
-                last[0] = p0;
-                last[1] = p1;
-                last[2] = p2;
-                last[3] = p3;
-                last[4] = p4;
-                last[5] = p5;
-                initialized = true;
-            }
-        }
-
-        return result;
+        RetryPendingInitialDisplayMode(thisPtr);
     }
 
     HRESULT __cdecl COperationStatusTile_UpdateSummary_Hook(
@@ -10259,6 +10188,7 @@ namespace
             SUCCEEDED(result))
         {
             RecordNativeSummary(thisPtr, summary);
+            RetryPendingInitialDisplayMode(thisPtr);
         }
         return result;
     }
@@ -10598,18 +10528,43 @@ namespace
         COperationDataProvider_WriteCurrentItem_t writeCurrentItem;
         COperationDataProvider_WriteProgressValues_t writeProgressValues;
         COperationStatusTile_RefreshDisplayProgress_t refreshDisplayProgress;
-        CProgressDialog_UpdateLocations_t updateLocations;
-        CProgressDialog_UpdateProgress6_t updateProgress6;
-        COperationStatusTileCache_GetProgressValues_t getProgressValues;
         COperationStatusTile_UpdateSummary_t updateSummary;
         COperationStatusTile_SetTileDisplayMode_t setTileDisplayMode;
         COperationStatusTileRateCalculator_CalculateRate_t calculateRate;
     };
 
+    HMODULE g_ownedDui70Module = nullptr;
+    HMODULE g_ownedShell32Module = nullptr;
+
+    void ReleaseOwnedSkinTargetModules()
+    {
+        if (g_ownedShell32Module)
+        {
+            FreeLibrary(g_ownedShell32Module);
+            g_ownedShell32Module = nullptr;
+        }
+
+        if (g_ownedDui70Module)
+        {
+            FreeLibrary(g_ownedDui70Module);
+            g_ownedDui70Module = nullptr;
+        }
+    }
     bool ResolveSkinTargets(SkinTargets *targets)
     {
-        HMODULE dui70 =
-            LoadLibraryExW(L"dui70.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        HMODULE dui70 = GetModuleHandleW(L"dui70.dll");
+        if (!dui70)
+        {
+            dui70 =
+                LoadLibraryExW(
+                    L"dui70.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+            if (dui70)
+            {
+                g_ownedDui70Module = dui70;
+            }
+        }
+
         if (!dui70)
         {
             Wh_Log(L"Skin setup failed: unable to load dui70.dll "
@@ -10674,8 +10629,19 @@ namespace
             return false;
         }
 
-        HMODULE shell32 =
-            LoadLibraryExW(L"shell32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        HMODULE shell32 = GetModuleHandleW(L"shell32.dll");
+        if (!shell32)
+        {
+            shell32 =
+                LoadLibraryExW(
+                    L"shell32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+            if (shell32)
+            {
+                g_ownedShell32Module = shell32;
+            }
+        }
+
         if (!shell32)
         {
             Wh_Log(L"Skin setup failed: unable to load shell32.dll "
@@ -10721,18 +10687,7 @@ namespace
                 nullptr,
                 false,
             },
-            {
-                {LR"(public: virtual long __cdecl CProgressDialog::UpdateLocations(struct IShellItem *,struct IShellItem *,struct IShellItem *))"},
-                &targets->updateLocations,
-                nullptr,
-                false,
-            },
-            {
-                {LR"(public: virtual long __cdecl CProgressDialog::UpdateProgress(unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64))"},
-                &targets->updateProgress6,
-                nullptr,
-                false,
-            },
+
             {
                 {LR"(public: virtual long __cdecl COperationDataProvider::WriteCurrentItem(struct IShellItem *))"},
                 &targets->writeCurrentItem,
@@ -10748,12 +10703,6 @@ namespace
             {
                 {LR"(private: long __cdecl COperationStatusTile::_UpdateRemainingItemsAndSize(unsigned __int64,unsigned __int64,unsigned __int64,unsigned __int64))"},
                 &targets->updateRemainingItemsAndSize,
-                nullptr,
-                false,
-            },
-            {
-                {LR"(public: long __cdecl COperationStatusTileCache::GetProgressValues(unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *,unsigned __int64 *))"},
-                &targets->getProgressValues,
                 nullptr,
                 false,
             },
@@ -10785,9 +10734,6 @@ namespace
             !targets->writeCurrentItem ||
             !targets->writeProgressValues ||
             !targets->refreshDisplayProgress ||
-            !targets->getProgressValues ||
-            !targets->updateLocations ||
-            !targets->updateProgress6 ||
             !targets->updateRemainingItemsAndSize || !targets->updateSummary ||
             !targets->setTileDisplayMode || !targets->calculateRate)
         {
@@ -10835,7 +10781,6 @@ namespace
             Wh_Log(L"Skin setup failed: unable to hook "
                    L"shell32!COperationStatusTile::_CreateTileElement");
             return false;
-
         }
 
         if (!WindhawkUtils::SetFunctionHook(
@@ -10868,26 +10813,6 @@ namespace
         }
 
         if (!WindhawkUtils::SetFunctionHook(
-                targets.updateLocations,
-                CProgressDialog_UpdateLocations_Hook,
-                &CProgressDialog_UpdateLocations_Original))
-        {
-            Wh_Log(L"Skin setup failed: unable to hook "
-                   L"shell32!CProgressDialog::UpdateLocations");
-            return false;
-        }
-
-        if (!WindhawkUtils::SetFunctionHook(
-                targets.updateProgress6,
-                CProgressDialog_UpdateProgress6_Hook,
-                &CProgressDialog_UpdateProgress6_Original))
-        {
-            Wh_Log(L"Skin setup failed: unable to hook "
-                   L"shell32!CProgressDialog::UpdateProgress(6)");
-            return false;
-        }
-
-        if (!WindhawkUtils::SetFunctionHook(
                 targets.writeCurrentItem,
                 COperationDataProvider_WriteCurrentItem_Hook,
                 &COperationDataProvider_WriteCurrentItem_Original))
@@ -10914,16 +10839,6 @@ namespace
         {
             Wh_Log(L"Skin setup failed: unable to hook "
                    L"shell32!COperationStatusTile::_RefreshDisplayProgress");
-            return false;
-        }
-
-        if (!WindhawkUtils::SetFunctionHook(
-                targets.getProgressValues,
-                COperationStatusTileCache_GetProgressValues_Hook,
-                &COperationStatusTileCache_GetProgressValues_Original))
-        {
-            Wh_Log(L"Skin setup failed: unable to hook "
-                   L"shell32!COperationStatusTileCache::GetProgressValues");
             return false;
         }
 
@@ -10962,7 +10877,7 @@ namespace
 BOOL Wh_ModInit()
 {
     g_unloading.store(false, std::memory_order_release);
-    Wh_Log(L"File Operation Styler 1.0.0 initialization started");
+    Wh_Log(L"File Operation Styler 1.1.0 initialization started");
 
     LoadSettings();
 
@@ -10975,10 +10890,11 @@ BOOL Wh_ModInit()
     if (!ResolveSkinTargets(&targets) || !InstallSkinHooks(targets))
     {
         ShutdownProgressCircleUi();
+        ReleaseOwnedSkinTargetModules();
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 1.0.0 initialization complete");
+    Wh_Log(L"File Operation Styler 1.1.0 initialization complete");
     return TRUE;
 }
 
@@ -10989,7 +10905,7 @@ void Wh_ModBeforeUninit()
         return;
     }
 
-    Wh_Log(L"File Operation Styler 1.0.0 presentation teardown started");
+    Wh_Log(L"File Operation Styler 1.1.0 presentation teardown started");
     {
         std::unique_lock<std::mutex> lock(g_presentationActivationMutex);
         g_presentationActivationCondition.wait(
@@ -10997,7 +10913,7 @@ void Wh_ModBeforeUninit()
             { return g_presentationActivations == 0; });
     }
     DestroyAllProgressCircles();
-    Wh_Log(L"File Operation Styler 1.0.0 presentation teardown complete");
+    Wh_Log(L"File Operation Styler 1.1.0 presentation teardown complete");
 }
 
 void Wh_ModUninit()
@@ -11006,10 +10922,14 @@ void Wh_ModUninit()
     {
         std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
         g_transferSummaries.clear();
+        ClearOperationDataBindingsLocked();
     }
     ClearSkinState();
+    ReleaseOwnedSkinTargetModules();
+    ShutdownSharedProgressBridge();
+    ShutdownGlassBufferedPaintApi();
     ShutdownDwmApi();
-    Wh_Log(L"File Operation Styler 1.0.0 uninitialization complete");
+    Wh_Log(L"File Operation Styler 1.1.0 uninitialization complete");
 }
 
 BOOL Wh_ModSettingsChanged(BOOL *bReload)
