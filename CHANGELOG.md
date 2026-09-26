@@ -1,6 +1,6 @@
 # File Operation Styler changelog
 
-## 1.1.0\*\*
+## 1.1.0
 
 - Added Frosted Glass theme with full-window glass styling and customizable footer appearance.
 - Added optional current-file progress bar showing progress for the file currently being copied or moved.
