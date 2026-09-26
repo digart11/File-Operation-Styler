@@ -1,5 +1,15 @@
 # File Operation Styler changelog
 
+## 1.1.0\*\*
+
+- Added Frosted Glass theme with full-window glass styling and customizable footer appearance.
+- Added optional current-file progress bar showing progress for the file currently being copied or moved.
+- Added footer customization with Glass or Solid styles, including custom solid footer colors.
+- Improved progress animations with smoother updates and reduced unnecessary repainting during long operations.
+- Improved handling of multiple simultaneous file operations and operation lifecycle cleanup.
+- Reduced overhead when current-file progress tracking is disabled by avoiding unnecessary file metadata tracking and shared progress processing.
+- Improved reliability when switching between normal progress views and special Explorer states such as conflicts or permission prompts.
+
 ## 1.0.0
 
 - Initial public release.
@@ -10,7 +20,6 @@
 - Supports multiple simultaneous file operations.
 - Preserves native Pause, Resume, Cancel, conflict, and error handling.
 - Includes built-in themes and customizable colors, typography, and progress styling.
-
 
 ## 0.12.0 architecture-alpha
 
@@ -45,4 +54,3 @@
   `nativeLabelWeight`, `actionSize`, and `actionWeight` settings are retained
   for settings compatibility but are temporarily inactive because 0.12 does
   not skin native DirectUI visuals.
-
