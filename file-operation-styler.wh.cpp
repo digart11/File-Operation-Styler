@@ -1,7 +1,9 @@
 // ==WindhawkMod==
 // @id              file-operation-styler
 // @name            File Operation Styler
+// @name:zh-CN      文件操作窗口美化
 // @description     Portable custom presentation for native Explorer file operations with a skin-safe unified presentation.
+// @description:zh-CN 为资源管理器原生文件操作提供便携的自定义外观，采用皮肤安全的统一呈现方式。
 // @version         1.1.0
 // @author          digART
 // @github          https://github.com/digart11
@@ -59,15 +61,21 @@ Settings changes apply to new file-operation windows; operations already in prog
 /*
 - showCurrentFileProgressBar: true
   $name: Show current-file progress bar
+  $name:zh-CN: 显示当前文件进度条
   $description: Show progress for the file currently being copied or moved.
+  $description:zh-CN: 显示当前正在复制或移动的文件的进度。
 
 - customization:
   - enabled: false
     $name: Enable customization
+    $name:zh-CN: 启用自定义
     $description: Turn on themes and custom style settings.
+    $description:zh-CN: 开启主题和自定义样式设置。
   - preset: blueDark
     $name: Theme
+    $name:zh-CN: 主题
     $description: Change color theme.
+    $description:zh-CN: 更改配色主题。
     $options:
     - blueDark: Blue Dark
     - graphite: Graphite
@@ -76,17 +84,32 @@ Settings changes apply to new file-operation windows; operations already in prog
     - light: Light
     - system: Windows / System
     - glass: Frosted Glass
+    $options:zh-CN:
+    - blueDark: 深蓝
+    - graphite: 石墨
+    - midnight: 午夜
+    - warmDark: 暖暗
+    - light: 浅色
+    - system: Windows / 系统
+    - glass: 磨砂玻璃
 
   - footerStyle: glass
     $name: Footer
+    $name:zh-CN: 页脚
     $description: Frosted Glass footer is available only when the Frosted Glass theme is selected.
+    $description:zh-CN: 仅当选择「磨砂玻璃」主题时，页脚才可使用磨砂玻璃效果。
     $options:
     - glass: Frosted Glass
     - solid: Solid
+    $options:zh-CN:
+    - glass: 磨砂玻璃
+    - solid: 实心
     #! $showIf: {preset: glass}
   - footerColorPreset: theme
     $name: Solid footer color preset
+    $name:zh-CN: 实心页脚颜色预设
     $description: Used when Frosted Glass is selected with a Solid footer.
+    $description:zh-CN: 当选择「磨砂玻璃」主题并使用实心页脚时生效。
     $options:
     - theme: Theme default
     - blueDark: Blue Dark
@@ -96,44 +119,71 @@ Settings changes apply to new file-operation windows; operations already in prog
     - light: Light
     - system: Windows / System
     - custom: Custom
+    $options:zh-CN:
+    - theme: 主题默认
+    - blueDark: 深蓝
+    - graphite: 石墨
+    - midnight: 午夜
+    - warmDark: 暖暗
+    - light: 浅色
+    - system: Windows / 系统
+    - custom: 自定义
     #! $showIf: {preset: glass, footerStyle: solid}
   - footerColor: ""
     $name: Solid footer custom color
+    $name:zh-CN: 实心页脚自定义颜色
     $description: Used only when Solid footer color preset is Custom. Enter a hex color such as #1C3346.
+    $description:zh-CN: "仅当实心页脚颜色预设为「自定义」时生效。请输入十六进制颜色，例如 #1C3346。"
     #! $format: colorRgb
     #! $showIf: {preset: glass, footerStyle: solid}
   - colors:
     - backgroundOverride: ""
       $name: Background
+      $name:zh-CN: 背景
       #! $format: colorRgb
     - accentOverride: ""
       $name: Accent
+      $name:zh-CN: 强调色
       #! $format: colorRgb
       $description: Circle, progress bar, graph, and links.
+      $description:zh-CN: 用于圆环、进度条、图表和链接。
     - primaryTextOverride: ""
       $name: Main text
+      $name:zh-CN: 主要文字
       #! $format: colorRgb
       $description: Large numbers and values.
+      $description:zh-CN: 大号数字和数值。
     - secondaryTextOverride: ""
       $name: Secondary text
+      $name:zh-CN: 次要文字
       #! $format: colorRgb
       $description: Labels and smaller text.
+      $description:zh-CN: 标签和较小文字。
     - inactiveOverride: ""
       $name: Track / inactive
+      $name:zh-CN: 轨道 / 非活动
       #! $format: colorRgb
       $description: Circle track and progress track.
+      $description:zh-CN: 圆环轨道和进度轨道。
     $name: Colors
+    $name:zh-CN: 颜色
     $description: "Leave blank to use the theme color. Enter a hex color such as #2D8BE0."
+    $description:zh-CN: "留空则使用主题颜色。可输入十六进制颜色，例如 #2D8BE0。"
   - style:
     - circleThickness: 7
       $name: Circle thickness
+      $name:zh-CN: 圆环粗细
     - progressThickness: 8
       $name: Progress bar thickness
+      $name:zh-CN: 进度条粗细
     $name: Progress style
+    $name:zh-CN: 进度样式
   - text:
     - fontPreset: default
       $name: Font
+      $name:zh-CN: 字体
       $description: Choose one font for the whole window.
+      $description:zh-CN: 为整个窗口选择一种字体。
       $options:
       - default: Windows default
       - segoeUI: Segoe UI
@@ -146,20 +196,42 @@ Settings changes apply to new file-operation windows; operations already in prog
       - georgia: Georgia
       - timesNewRoman: Times New Roman
       - consolas: Consolas
+      $options:zh-CN:
+      - default: Windows 默认
+      - segoeUI: Segoe UI
+      - segoeUIVariable: Segoe UI Variable
+      - arial: Arial
+      - calibri: Calibri
+      - tahoma: Tahoma
+      - verdana: Verdana
+      - trebuchetMS: Trebuchet MS
+      - georgia: Georgia
+      - timesNewRoman: Times New Roman
+      - consolas: Consolas
     - customFont: ""
       $name: Custom font
+      $name:zh-CN: 自定义字体
       $description: Optional. Enter an installed font name here to use it instead of the selection above.
+      $description:zh-CN: 可选。在此输入已安装的字体名称，以替代上面的选择。
     - bodySize: 11
       $name: Details text size
+      $name:zh-CN: 详情文字大小
       $description: Source and destination, items, speed, time, Complete, and footer text.
+      $description:zh-CN: 用于来源与目标、项目数、速度、时间、「完成」及页脚文字。
     - summarySize: 23
       $name: Summary text size
+      $name:zh-CN: 摘要文字大小
       $description: The large transferred / total line, for example 1.2 GB / 4.0 GB.
+      $description:zh-CN: 显示已传输 / 总计的大号文字行，例如 1.2 GB / 4.0 GB。
     - percentSize: 26
       $name: Circle percentage size
+      $name:zh-CN: 圆环百分比大小
       $description: The percentage number inside the progress circle.
+      $description:zh-CN: 进度圆环内的百分比数字。
     $name: Text
+    $name:zh-CN: 文字
   $name: Customization
+  $name:zh-CN: 自定义
 */
 // ==/WindhawkModSettings==
 
