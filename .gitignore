@@ -1,1 +1,5 @@
-*-broken.wh.cpp
+﻿_archive/
+*.bak
+*.diff
+*.cpp.before-*
+images/file-operation-styler-themes1.png
