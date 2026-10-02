@@ -1,6 +1,6 @@
 // ==WindhawkMod==
-// @id              file-operation-styler
-// @name            File Operation Styler
+// @id              file-operation-styler2
+// @name            File Operation Styler2
 // @description     Portable custom presentation for native Explorer file operations with a skin-safe unified presentation.
 // @version         1.1.0
 // @author          digART
@@ -76,6 +76,27 @@ Settings changes apply to new file-operation windows; operations already in prog
     - light: Light
     - system: Windows / System
     - glass: Frosted Glass
+
+  - glassEffect: acrylic
+    $name: Glass effect
+    $description: Choose the translucent backdrop used by the Frosted Glass theme.
+    $options:
+    - blur: Blur
+    - acrylic: Acrylic
+    - mica: Mica
+    - micaAlt: Mica Alt
+    #! $showIf: {preset: glass}
+
+  - glassTint: "#000000"
+    $name: Glass tint
+    $description: Color blended over the translucent background.
+    #! $format: colorRgb
+    #! $showIf: {preset: glass}
+
+  - glassTintStrength: 0
+    $name: Glass tint / opacity
+    $description: 0 is clearest. Higher values add more of the selected tint color.
+    #! $showIf: {preset: glass}
 
   - footerStyle: glass
     $name: Footer
@@ -170,6 +191,7 @@ Settings changes apply to new file-operation windows; operations already in prog
 #include <windhawk_utils.h>
 
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <gdiplus.h>
 #include <shlwapi.h>
 #include <windows.h>
@@ -926,6 +948,7 @@ namespace
         TypographyConfig typography{};
         ElementConfig elements{};
 
+        std::wstring glassEffect = L"acrylic";
         COLORREF glassTint = RGB(0, 0, 0);
         int glassStrength = 0;
         std::wstring footerStyle = L"glass";
@@ -1279,11 +1302,30 @@ namespace
 
         g_settings.theme = MakePresetTheme(g_settings.preset);
 
-        // Glass tint support is intentionally retained internally but is not
-        // currently exposed. Keep the public Glass preset neutral so the native
-        // title area and custom client area remain visually consistent.
+        g_settings.glassEffect =
+            GetStringSettingValue(
+                L"customization.glassEffect");
+
+        if (g_settings.glassEffect != L"blur" &&
+            g_settings.glassEffect != L"acrylic" &&
+            g_settings.glassEffect != L"mica" &&
+            g_settings.glassEffect != L"micaAlt")
+        {
+            g_settings.glassEffect = L"acrylic";
+        }
+
         g_settings.glassTint = RGB(0, 0, 0);
-        g_settings.glassStrength = 0;
+
+        ParseColorValue(
+            GetStringSettingValue(
+                L"customization.glassTint"),
+            &g_settings.glassTint);
+
+        g_settings.glassStrength =
+            GetClampedIntSetting(
+                L"customization.glassTintStrength",
+                0,
+                100);
 
         g_settings.footerStyle =
             GetStringSettingValue(
@@ -1513,7 +1555,44 @@ namespace
     constexpr COLORREF kDwmColorNone = 0xFFFFFFFE;
     constexpr DWORD kDwmwaSystemBackdropType = 38;
     constexpr int kDwmsbtAuto = 0;
+    constexpr int kDwmsbtMainWindow = 2;
     constexpr int kDwmsbtTransientWindow = 3;
+    constexpr int kDwmsbtTabbedWindow = 4;
+
+    constexpr int kWcaAccentPolicy = 19;
+    constexpr int kAccentStateDisabled = 0;
+    constexpr int kAccentEnableAcrylicBlurBehind = 4;
+
+    constexpr wchar_t kGlassEffectAppliedProperty[] =
+        L"Windhawk.FileOperationStyler.GlassEffectApplied";
+
+    constexpr wchar_t kGlassAccentBlurAppliedProperty[] =
+        L"Windhawk.FileOperationStyler.GlassAccentBlurApplied";
+
+    struct GlassAccentPolicy
+    {
+        int accentState;
+        int accentFlags;
+        int gradientColor;
+        int animationId;
+    };
+
+    struct GlassWindowCompositionAttributeData
+    {
+        int attribute;
+        PVOID data;
+        SIZE_T size;
+    };
+
+    using SetWindowCompositionAttribute_t =
+        BOOL(WINAPI *)(
+            HWND,
+            GlassWindowCompositionAttributeData *);
+
+    using DwmEnableBlurBehindWindow_t =
+        HRESULT(WINAPI *)(
+            HWND,
+            DWM_BLURBEHIND const *);
 
     static thread_local bool g_glassTransparentInfoPanelPaint = false;
 
@@ -1522,6 +1601,7 @@ namespace
 
     HMODULE g_ownedDwmApiModule;
     DwmSetWindowAttribute_t g_dwmSetWindowAttribute;
+    DwmEnableBlurBehindWindow_t g_dwmEnableBlurBehindWindow;
 
     DwmSetWindowAttribute_t GetDwmSetWindowAttribute()
     {
@@ -1554,6 +1634,7 @@ namespace
     void ShutdownDwmApi()
     {
         g_dwmSetWindowAttribute = nullptr;
+        g_dwmEnableBlurBehindWindow = nullptr;
         if (g_ownedDwmApiModule)
         {
             FreeLibrary(g_ownedDwmApiModule);
@@ -1561,6 +1642,127 @@ namespace
         }
     }
 
+    DwmEnableBlurBehindWindow_t GetDwmEnableBlurBehindWindow()
+    {
+        GetDwmSetWindowAttribute();
+        return g_dwmEnableBlurBehindWindow;
+    }
+
+    SetWindowCompositionAttribute_t GetSetWindowCompositionAttribute()
+    {
+        static SetWindowCompositionAttribute_t function =
+            reinterpret_cast<SetWindowCompositionAttribute_t>(
+                GetProcAddress(
+                    GetModuleHandleW(L"user32.dll"),
+                    "SetWindowCompositionAttribute"));
+
+        return function;
+    }
+
+    DWORD MakeGlassAccentGradientColor()
+    {
+        // ACCENT_POLICY uses AABBGGRR. COLORREF already stores BBGGRR.
+        int alpha = std::clamp(
+            g_settings.glassStrength * 255 / 100,
+            0,
+            255);
+
+        // Keep a virtually transparent alpha when the user selects 0.
+        // AccentBlurBehind still needs an active composition recipe.
+        if (alpha == 0)
+        {
+            alpha = 1;
+        }
+
+        return
+            (static_cast<DWORD>(alpha) << 24) |
+            (static_cast<DWORD>(g_settings.glassTint) & 0x00FFFFFF);
+    }
+
+    void SetGlassAccentBlurBehind(
+        HWND hostWindow,
+        bool enabled)
+    {
+        if (!hostWindow || !IsWindow(hostWindow))
+        {
+            return;
+        }
+
+        if (!enabled)
+        {
+            // Never send ACCENT_STATE_DISABLED to a window that never had
+            // our Blur recipe. Doing so can disturb the native Acrylic
+            // SystemBackdrop path even though Acrylic itself is correct.
+            if (!GetPropW(
+                    hostWindow,
+                    kGlassAccentBlurAppliedProperty))
+            {
+                return;
+            }
+        }
+
+        SetWindowCompositionAttribute_t setCompositionAttribute =
+            GetSetWindowCompositionAttribute();
+
+        if (!setCompositionAttribute)
+        {
+            Wh_Log(
+                L"Glass: SetWindowCompositionAttribute unavailable hwnd=%p",
+                reinterpret_cast<void *>(hostWindow));
+            return;
+        }
+
+        GlassAccentPolicy accentPolicy{};
+        accentPolicy.accentState =
+            enabled
+                ? kAccentEnableAcrylicBlurBehind
+                : kAccentStateDisabled;
+
+        if (enabled)
+        {
+            accentPolicy.gradientColor =
+                static_cast<int>(
+                    MakeGlassAccentGradientColor());
+        }
+
+        GlassWindowCompositionAttributeData data{};
+        data.attribute = kWcaAccentPolicy;
+        data.data = &accentPolicy;
+        data.size = sizeof(accentPolicy);
+
+        if (!setCompositionAttribute(hostWindow, &data))
+        {
+            Wh_Log(
+                L"Glass: SetWindowCompositionAttribute failed "
+                L"hwnd=%p error=%lu",
+                reinterpret_cast<void *>(hostWindow),
+                GetLastError());
+            return;
+        }
+
+        if (enabled)
+        {
+            SetPropW(
+                hostWindow,
+                kGlassAccentBlurAppliedProperty,
+                reinterpret_cast<HANDLE>(1));
+        }
+        else
+        {
+            RemovePropW(
+                hostWindow,
+                kGlassAccentBlurAppliedProperty);
+        }
+
+        Wh_Log(
+            L"Glass: AccentBlurBehind %s tint=#%02X%02X%02X strength=%d hwnd=%p",
+            enabled ? L"enabled" : L"disabled",
+            GetRValue(g_settings.glassTint),
+            GetGValue(g_settings.glassTint),
+            GetBValue(g_settings.glassTint),
+            g_settings.glassStrength,
+            reinterpret_cast<void *>(hostWindow));
+    }
     struct GlassFrameMargins
     {
         int left;
@@ -1634,7 +1836,71 @@ namespace
             return;
         }
 
-        int backdropType = kDwmsbtTransientWindow;
+        // Acrylic is the compatibility path. Keep this sequence equivalent
+        // to the proven 1.1 implementation and do not touch ACCENT_POLICY.
+        if (g_settings.glassEffect == L"acrylic")
+        {
+            int backdropType = kDwmsbtTransientWindow;
+
+            HRESULT backdropResult =
+                setAttribute(
+                    hostWindow,
+                    kDwmwaSystemBackdropType,
+                    &backdropType,
+                    sizeof(backdropType));
+
+            if (FAILED(backdropResult))
+            {
+                Wh_Log(
+                    L"Glass: Acrylic SYSTEMBACKDROP_TYPE failed "
+                    L"result=0x%08X hwnd=%p",
+                    static_cast<unsigned int>(backdropResult),
+                    reinterpret_cast<void *>(hostWindow));
+            }
+
+            SetGlassClientFrameExtension(hostWindow, true);
+
+            SetPropW(
+                hostWindow,
+                kGlassEffectAppliedProperty,
+                reinterpret_cast<HANDLE>(1));
+
+            if (!IsIconic(hostWindow))
+            {
+                DefWindowProcW(hostWindow, WM_NCACTIVATE, TRUE, -1);
+            }
+
+            Wh_Log(
+                L"Glass: applied effect=acrylic tint=#%02X%02X%02X "
+                L"strength=%d hwnd=%p",
+                GetRValue(g_settings.glassTint),
+                GetGValue(g_settings.glassTint),
+                GetBValue(g_settings.glassTint),
+                g_settings.glassStrength,
+                reinterpret_cast<void *>(hostWindow));
+
+            return;
+        }
+
+        // The remaining effects use their own explicit recipes.
+        int backdropType = kDwmsbtAuto;
+
+        if (g_settings.glassEffect == L"mica")
+        {
+            SetGlassAccentBlurBehind(hostWindow, false);
+            backdropType = kDwmsbtMainWindow;
+        }
+        else if (g_settings.glassEffect == L"micaAlt")
+        {
+            SetGlassAccentBlurBehind(hostWindow, false);
+            backdropType = kDwmsbtTabbedWindow;
+        }
+        else
+        {
+            // Blur uses AccentBlurBehind instead of a SystemBackdrop recipe.
+            backdropType = kDwmsbtAuto;
+        }
+
         HRESULT backdropResult =
             setAttribute(
                 hostWindow,
@@ -1650,17 +1916,32 @@ namespace
                 reinterpret_cast<void *>(hostWindow));
         }
 
+        if (g_settings.glassEffect == L"blur")
+        {
+            SetGlassAccentBlurBehind(hostWindow, true);
+        }
+
         SetGlassClientFrameExtension(hostWindow, true);
 
-        // Desktop Acrylic otherwise uses its solid inactive fallback. Keep
-        // DWM's nonclient appearance active without activating the HWND.
-        // Also covers applying/resuming Glass on an already inactive host.
+        SetPropW(
+            hostWindow,
+            kGlassEffectAppliedProperty,
+            reinterpret_cast<HANDLE>(1));
+
+        Wh_Log(
+            L"Glass: applied effect=%s tint=#%02X%02X%02X strength=%d hwnd=%p",
+            g_settings.glassEffect.c_str(),
+            GetRValue(g_settings.glassTint),
+            GetGValue(g_settings.glassTint),
+            GetBValue(g_settings.glassTint),
+            g_settings.glassStrength,
+            reinterpret_cast<void *>(hostWindow));
+
         if (!IsIconic(hostWindow))
         {
             DefWindowProcW(hostWindow, WM_NCACTIVATE, TRUE, -1);
         }
     }
-
     void ApplyHostThemeColors(HWND hostWindow)
     {
         if (!ShouldApplyNativeColorOverrides())
@@ -1719,8 +2000,14 @@ namespace
             return;
         }
 
-        if (IsGlassTheme())
+        bool hadGlassEffect =
+            RemovePropW(
+                hostWindow,
+                kGlassEffectAppliedProperty) != nullptr;
+
+        if (hadGlassEffect || IsGlassTheme())
         {
+            SetGlassAccentBlurBehind(hostWindow, false);
             SetGlassClientFrameExtension(hostWindow, false);
         }
 
@@ -6632,7 +6919,8 @@ namespace
             }
 
             {
-                if (g_settings.glassStrength > 0)
+                if (g_settings.glassStrength > 0 &&
+                    g_settings.glassEffect != L"blur")
                 {
                     int tintAlpha = std::clamp(
                         g_settings.glassStrength * 255 / 100,
