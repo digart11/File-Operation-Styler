@@ -78,25 +78,23 @@ Settings changes apply to new file-operation windows; operations already in prog
     - glass: Frosted Glass
 
   - glassEffect: acrylic
-    $name: Glass effect
-    $description: Choose the translucent backdrop used by the Frosted Glass theme.
+    $name: Frosted Glass style
+    $description: Choose the glass effect used by the Frosted Glass theme.
     $options:
-    - blur: Blur
-    - acrylic: Acrylic
-    - mica: Mica
-    - micaAlt: Mica Alt
+    - acrylic: Windows Acrylic
+    - blur: Custom Blur
     #! $showIf: {preset: glass}
 
   - glassTint: "#000000"
-    $name: Glass tint
-    $description: Color blended over the translucent background.
+    $name: Blur tint
+    $description: Tint color used by Custom Blur.
     #! $format: colorRgb
-    #! $showIf: {preset: glass}
+    #! $showIf: {preset: glass, glassEffect: blur}
 
   - glassTintStrength: 0
-    $name: Glass tint / opacity
-    $description: 0 is clearest. Higher values add more of the selected tint color.
-    #! $showIf: {preset: glass}
+    $name: Glass opacity
+    $description: Higher values make Custom Blur less transparent while preserving the selected tint color.
+    #! $showIf: {preset: glass, glassEffect: blur}
 
   - footerStyle: glass
     $name: Footer
@@ -1307,9 +1305,7 @@ namespace
                 L"customization.glassEffect");
 
         if (g_settings.glassEffect != L"blur" &&
-            g_settings.glassEffect != L"acrylic" &&
-            g_settings.glassEffect != L"mica" &&
-            g_settings.glassEffect != L"micaAlt")
+            g_settings.glassEffect != L"acrylic")
         {
             g_settings.glassEffect = L"acrylic";
         }
@@ -1555,9 +1551,7 @@ namespace
     constexpr COLORREF kDwmColorNone = 0xFFFFFFFE;
     constexpr DWORD kDwmwaSystemBackdropType = 38;
     constexpr int kDwmsbtAuto = 0;
-    constexpr int kDwmsbtMainWindow = 2;
     constexpr int kDwmsbtTransientWindow = 3;
-    constexpr int kDwmsbtTabbedWindow = 4;
 
     constexpr int kWcaAccentPolicy = 19;
     constexpr int kAccentStateDisabled = 0;
@@ -1662,20 +1656,12 @@ namespace
     DWORD MakeGlassAccentGradientColor()
     {
         // ACCENT_POLICY uses AABBGGRR. COLORREF already stores BBGGRR.
-        int alpha = std::clamp(
-            g_settings.glassStrength * 255 / 100,
-            0,
-            255);
-
-        // Keep a virtually transparent alpha when the user selects 0.
-        // AccentBlurBehind still needs an active composition recipe.
-        if (alpha == 0)
-        {
-            alpha = 1;
-        }
+        // Keep a small tint contribution at every opacity level so choosing
+        // opacity 0 never removes the selected Custom Blur color.
+        constexpr DWORD kCustomBlurBaseTintAlpha = 32;
 
         return
-            (static_cast<DWORD>(alpha) << 24) |
+            (kCustomBlurBaseTintAlpha << 24) |
             (static_cast<DWORD>(g_settings.glassTint) & 0x00FFFFFF);
     }
 
@@ -1882,24 +1868,9 @@ namespace
             return;
         }
 
-        // The remaining effects use their own explicit recipes.
+        // Custom Blur uses AccentBlurBehind instead of the Windows
+        // Acrylic SystemBackdrop recipe.
         int backdropType = kDwmsbtAuto;
-
-        if (g_settings.glassEffect == L"mica")
-        {
-            SetGlassAccentBlurBehind(hostWindow, false);
-            backdropType = kDwmsbtMainWindow;
-        }
-        else if (g_settings.glassEffect == L"micaAlt")
-        {
-            SetGlassAccentBlurBehind(hostWindow, false);
-            backdropType = kDwmsbtTabbedWindow;
-        }
-        else
-        {
-            // Blur uses AccentBlurBehind instead of a SystemBackdrop recipe.
-            backdropType = kDwmsbtAuto;
-        }
 
         HRESULT backdropResult =
             setAttribute(
@@ -1916,10 +1887,7 @@ namespace
                 reinterpret_cast<void *>(hostWindow));
         }
 
-        if (g_settings.glassEffect == L"blur")
-        {
-            SetGlassAccentBlurBehind(hostWindow, true);
-        }
+        SetGlassAccentBlurBehind(hostWindow, true);
 
         SetGlassClientFrameExtension(hostWindow, true);
 
@@ -6919,13 +6887,23 @@ namespace
             }
 
             {
-                if (g_settings.glassStrength > 0 &&
-                    g_settings.glassEffect != L"blur")
+                if (g_settings.glassEffect == L"blur" &&
+                    g_settings.glassStrength > 0)
                 {
-                    int tintAlpha = std::clamp(
-                        g_settings.glassStrength * 255 / 100,
+                    // AccentBlurBehind already supplies the base tint.
+                    // This overlay controls only additional opacity.
+                    // Use a quadratic curve so low values stay subtle
+                    // instead of quickly turning into a solid color fill.
+                    constexpr int kCustomBlurMaximumOverlayAlpha = 140;
+
+                    int strength = std::clamp(
+                        g_settings.glassStrength,
                         0,
-                        255);
+                        100);
+
+                    int tintAlpha =
+                        strength * strength *
+                        kCustomBlurMaximumOverlayAlpha / 10000;
 
                     Gdiplus::Graphics glassGraphics(bufferDc);
                     Gdiplus::SolidBrush tintBrush(
