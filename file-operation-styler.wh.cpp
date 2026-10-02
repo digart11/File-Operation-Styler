@@ -61,6 +61,11 @@ Settings changes apply to new file-operation windows; operations already in prog
   $name: Show current-file progress bar
   $description: Show progress for the file currently being copied or moved.
 
+- hideSmallControlButtons: false
+  $name: Hide small control buttons
+  $description: Hide the small Pause / Resume and Cancel controls in the upper-right corner. The progress circle and bottom Cancel button remain available.
+
+
 - customization:
   - enabled: false
     $name: Enable customization
@@ -907,7 +912,7 @@ namespace
         std::wstring circleFont = L"Segoe UI Variable Display";
         std::wstring circleLabelFont = L"Segoe UI Variable";
         std::wstring nativeFont = L"Segoe UI Variable";
-        int circlePercentSize = 26;
+        int circlePercentSize = 25;
         int circleLabelSize = 11;
         int bodySize = 11;
         int graphValueSize = 10;
@@ -939,6 +944,7 @@ namespace
     struct ModSettings
     {
         bool customizationEnabled = false;
+        bool hideSmallControlButtons = false;
         std::wstring preset = L"blueDark";
         ThemePalette theme{};
         bool applyNativeColors = false;
@@ -1287,6 +1293,10 @@ namespace
 
         g_showCurrentFileProgressBar =
             Wh_GetIntSetting(L"showCurrentFileProgressBar") != 0;
+
+        g_settings.hideSmallControlButtons =
+            Wh_GetIntSetting(L"hideSmallControlButtons") != 0;
+
 
         g_settings.customizationEnabled =
             Wh_GetIntSetting(L"customization.enabled") != 0;
@@ -2054,6 +2064,7 @@ namespace
 
     constexpr UINT kCurrentFileAnimationMessage = WM_APP + 0x51;
     constexpr UINT_PTR kCurrentFileAnimationTimer = 0xF0510020;
+    constexpr UINT_PTR kCircleHoverAnimationTimer = 0xF0510021;
 
     struct CurrentFileAnimation
     {
@@ -2090,6 +2101,7 @@ namespace
         int positionHeight;
         bool positionValid;
         CurrentFileAnimation currentFileAnimation{};
+        bool circleHovered = false;
     };
 
     struct HostPositionRequest
@@ -2760,6 +2772,7 @@ namespace
         bool displayModeKnown = false;
         bool deleteLike = false;
         bool paused = false;
+        bool circleHovered = false;
         std::wstring description;
         std::wstring descriptionStart;
         std::wstring firstLocation;
@@ -2793,6 +2806,7 @@ namespace
             snapshot->percent = std::clamp(it->progressPercent, 0, 100);
             storedPaused = it->paused;
             storedPausedKnown = it->pausedStateKnown;
+            snapshot->circleHovered = it->circleHovered;
             animation = it->currentFileAnimation;
 
             snapshot->displayedOverallPercent =
@@ -3063,11 +3077,63 @@ namespace
     void GetInfoPanelPauseRect(HWND infoWindow, RECT *pauseRect);
     void GetInfoPanelCancelRect(HWND infoWindow, RECT *cancelRect);
 
+    void SetCircleHoverState(HWND infoWindow, bool hovered)
+    {
+        if (!infoWindow || !IsWindow(infoWindow))
+        {
+            return;
+        }
+
+        OperationTileElement *tile = nullptr;
+        bool changed = false;
+
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+
+            auto it = std::find_if(
+                g_circles.begin(),
+                g_circles.end(),
+                [infoWindow](CircleState const &state)
+                {
+                    return state.infoWindow == infoWindow;
+                });
+
+            if (it == g_circles.end())
+            {
+                return;
+            }
+
+            tile = it->tile;
+
+            if (it->circleHovered != hovered)
+            {
+                it->circleHovered = hovered;
+                changed = true;
+            }
+        }
+
+        if (hovered)
+        {
+            SetTimer(
+                infoWindow,
+                kCircleHoverAnimationTimer,
+                32,
+                nullptr);
+        }
+
+        if (changed && tile)
+        {
+            InvalidateInfoPanelForTile(tile, false);
+        }
+    }
+
     void DrawEmbeddedProgressCircle(Gdiplus::Graphics &graphics,
                                     UINT dpi,
                                     double displayProgress,
                                     ThemePalette const &theme,
-                                    TypographyConfig const &type)
+                                    TypographyConfig const &type,
+                                    bool paused = false,
+                                    bool hovered = false)
     {
         if (!ActiveElements().showCircle)
         {
@@ -3131,12 +3197,12 @@ namespace
             type.circleFont.c_str(),
             static_cast<Gdiplus::REAL>(
                 ScaleForDpi(type.circlePercentSize, dpi)),
-            Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
         Gdiplus::Font percentageFallback(
             L"Segoe UI",
             static_cast<Gdiplus::REAL>(
                 ScaleForDpi(type.circlePercentSize, dpi)),
-            Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+            Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
         Gdiplus::Font labelFont(
             type.circleLabelFont.c_str(),
             static_cast<Gdiplus::REAL>(
@@ -3172,13 +3238,330 @@ namespace
         Gdiplus::RectF labelBounds(
             ringLeft, ringTop + diameter * 0.59f, diameter,
             static_cast<Gdiplus::REAL>(ScaleForDpi(24, dpi)));
-        graphics.DrawString(percentageText, -1, selectedPercentageFont,
-                            percentageBounds, &centeredText, &primaryBrush);
-        if (ActiveElements().showCompleteLabel)
+        // ------------------------------------------------------------
+        // INTERACTIVE CIRCLE CENTER
+        // ------------------------------------------------------------
+
+        constexpr double kInteractionPi =
+            3.14159265358979323846;
+
+        double interactionPhase =
+            static_cast<double>(
+                GetTickCount64() % 800) /
+            800.0;
+
+        double interactionWave =
+            0.5 -
+            0.5 * std::cos(
+                interactionPhase *
+                2.0 *
+                kInteractionPi);
+
+        Gdiplus::REAL centerX =
+            ringLeft + diameter / 2.0f;
+
+        Gdiplus::REAL centerY =
+            ringTop + diameter / 2.0f;
+
+        if (!paused && !hovered)
         {
-            graphics.DrawString(L"Complete", -1, selectedLabelFont,
-                                labelBounds, &centeredText,
-                                &secondaryBrush);
+            // Normal running state: use the original clean presentation.
+            graphics.DrawString(
+                percentageText,
+                -1,
+                selectedPercentageFont,
+                percentageBounds,
+                &centeredText,
+                &primaryBrush);
+
+            if (ActiveElements().showCompleteLabel)
+            {
+                graphics.DrawString(
+                    L"Complete",
+                    -1,
+                    selectedLabelFont,
+                    labelBounds,
+                    &centeredText,
+                    &secondaryBrush);
+            }
+        }
+        else if (!paused && hovered)
+        {
+            // Hover state: show only the Pause affordance.
+            Gdiplus::REAL iconScale =
+                static_cast<Gdiplus::REAL>(
+                    1.0 +
+                    interactionWave * 0.08);
+
+            Gdiplus::REAL halfHeight =
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(20, dpi)) *
+                iconScale;
+
+            Gdiplus::REAL separation =
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(9, dpi)) *
+                iconScale;
+
+            BYTE outerGlowAlpha =
+                static_cast<BYTE>(
+                    22 +
+                    interactionWave * 14);
+
+            BYTE innerGlowAlpha =
+                static_cast<BYTE>(
+                    44 +
+                    interactionWave * 22);
+
+            BYTE foregroundAlpha =
+                static_cast<BYTE>(
+                    165 +
+                    interactionWave * 18);
+
+            Gdiplus::Pen pauseOuterGlow(
+                Gdiplus::Color(
+                    outerGlowAlpha,
+                    GetRValue(theme.accent),
+                    GetGValue(theme.accent),
+                    GetBValue(theme.accent)),
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(15, dpi)));
+
+            pauseOuterGlow.SetStartCap(
+                Gdiplus::LineCapRound);
+            pauseOuterGlow.SetEndCap(
+                Gdiplus::LineCapRound);
+
+            Gdiplus::Pen pauseInnerGlow(
+                Gdiplus::Color(
+                    innerGlowAlpha,
+                    GetRValue(theme.primaryText),
+                    GetGValue(theme.primaryText),
+                    GetBValue(theme.primaryText)),
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(12, dpi)));
+
+            pauseInnerGlow.SetStartCap(
+                Gdiplus::LineCapRound);
+            pauseInnerGlow.SetEndCap(
+                Gdiplus::LineCapRound);
+
+            Gdiplus::Pen pausePen(
+                Gdiplus::Color(
+                    foregroundAlpha,
+                    GetRValue(theme.primaryText),
+                    GetGValue(theme.primaryText),
+                    GetBValue(theme.primaryText)),
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(10, dpi)));
+
+            pausePen.SetStartCap(
+                Gdiplus::LineCapRound);
+            pausePen.SetEndCap(
+                Gdiplus::LineCapRound);
+
+            auto drawPauseBars =
+                [&](Gdiplus::Pen *pen)
+            {
+                graphics.DrawLine(
+                    pen,
+                    centerX - separation,
+                    centerY - halfHeight,
+                    centerX - separation,
+                    centerY + halfHeight);
+
+                graphics.DrawLine(
+                    pen,
+                    centerX + separation,
+                    centerY - halfHeight,
+                    centerX + separation,
+                    centerY + halfHeight);
+            };
+
+            drawPauseBars(&pauseOuterGlow);
+            drawPauseBars(&pauseInnerGlow);
+            drawPauseBars(&pausePen);
+        }
+        else
+        {
+            // Paused / resume state.
+            Gdiplus::REAL playScale =
+                static_cast<Gdiplus::REAL>(
+                    1.0 +
+                    interactionWave * 0.12);
+
+            Gdiplus::REAL playCenterY =
+                centerY -
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(5, dpi));
+
+            Gdiplus::REAL halfHeight =
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(22, dpi)) *
+                playScale;
+
+            Gdiplus::REAL halfWidth =
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(18, dpi)) *
+                playScale;
+
+            Gdiplus::PointF playPoints[3] =
+            {
+                {
+                    centerX - halfWidth * 0.58f,
+                    playCenterY - halfHeight
+                },
+                {
+                    centerX - halfWidth * 0.58f,
+                    playCenterY + halfHeight
+                },
+                {
+                    centerX + halfWidth,
+                    playCenterY
+                }
+            };
+
+            BYTE outerGlowAlpha =
+                static_cast<BYTE>(
+                    30 +
+                    interactionWave * 16);
+
+            BYTE innerGlowAlpha =
+                static_cast<BYTE>(
+                    56 +
+                    interactionWave * 18);
+
+            Gdiplus::Pen playOuterGlow(
+                Gdiplus::Color(
+                    outerGlowAlpha,
+                    GetRValue(theme.accent),
+                    GetGValue(theme.accent),
+                    GetBValue(theme.accent)),
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(10, dpi)));
+
+            playOuterGlow.SetLineJoin(
+                Gdiplus::LineJoinRound);
+
+            graphics.DrawPolygon(
+                &playOuterGlow,
+                playPoints,
+                ARRAYSIZE(playPoints));
+
+            Gdiplus::Pen playInnerGlow(
+                Gdiplus::Color(
+                    innerGlowAlpha,
+                    GetRValue(theme.primaryText),
+                    GetGValue(theme.primaryText),
+                    GetBValue(theme.primaryText)),
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(5, dpi)));
+
+            playInnerGlow.SetLineJoin(
+                Gdiplus::LineJoinRound);
+
+            graphics.DrawPolygon(
+                &playInnerGlow,
+                playPoints,
+                ARRAYSIZE(playPoints));
+
+            Gdiplus::SolidBrush playBrush(
+                Gdiplus::Color(
+                    230,
+                    GetRValue(theme.primaryText),
+                    GetGValue(theme.primaryText),
+                    GetBValue(theme.primaryText)));
+
+            graphics.FillPolygon(
+                &playBrush,
+                playPoints,
+                ARRAYSIZE(playPoints));
+
+            // Soft rounded edge so the Play symbol visually matches the
+            // rounded Pause bars without changing its basic geometry.
+            Gdiplus::Pen playRoundedEdge(
+                Gdiplus::Color(
+                    230,
+                    GetRValue(theme.primaryText),
+                    GetGValue(theme.primaryText),
+                    GetBValue(theme.primaryText)),
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(4, dpi)));
+
+            playRoundedEdge.SetLineJoin(
+                Gdiplus::LineJoinRound);
+
+            graphics.DrawPolygon(
+                &playRoundedEdge,
+                playPoints,
+                ARRAYSIZE(playPoints));
+
+            Gdiplus::Pen playHighlight(
+                Gdiplus::Color(
+                    110,
+                    255,
+                    255,
+                    255),
+                static_cast<Gdiplus::REAL>(
+                    ScaleForDpi(1, dpi)));
+
+            playHighlight.SetLineJoin(
+                Gdiplus::LineJoinRound);
+
+            graphics.DrawPolygon(
+                &playHighlight,
+                playPoints,
+                ARRAYSIZE(playPoints));
+
+            if (ActiveElements().showCompleteLabel)
+            {
+                Gdiplus::Font resumeFont(
+                    type.circleLabelFont.c_str(),
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(
+                            type.circleLabelSize + 1,
+                            dpi)),
+                    Gdiplus::FontStyleBold,
+                    Gdiplus::UnitPixel);
+
+                Gdiplus::Font resumeFallback(
+                    L"Segoe UI",
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(
+                            type.circleLabelSize + 1,
+                            dpi)),
+                    Gdiplus::FontStyleBold,
+                    Gdiplus::UnitPixel);
+
+                Gdiplus::Font *selectedResumeFont =
+                    resumeFont.GetLastStatus() ==
+                            Gdiplus::Ok
+                        ? &resumeFont
+                        : &resumeFallback;
+
+                Gdiplus::RectF resumeBounds(
+                    ringLeft,
+                    ringTop +
+                        diameter * 0.70f,
+                    diameter,
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(21, dpi)));
+
+                Gdiplus::SolidBrush resumeBrush(
+                    Gdiplus::Color(
+                        210,
+                        GetRValue(theme.primaryText),
+                        GetGValue(theme.primaryText),
+                        GetBValue(theme.primaryText)));
+
+                graphics.DrawString(
+                    L"Resume",
+                    -1,
+                    selectedResumeFont,
+                    resumeBounds,
+                    &centeredText,
+                    &resumeBrush);
+            }
         }
     }
 
@@ -3241,7 +3624,13 @@ namespace
         }
 
         DrawEmbeddedProgressCircle(
-            graphics, dpi, snapshot.displayedOverallPercent, theme, type);
+            graphics,
+            dpi,
+            snapshot.displayedOverallPercent,
+            theme,
+            type,
+            snapshot.paused,
+            snapshot.circleHovered);
 
         int effectiveBodySize =
             type.bodySize +
@@ -4107,6 +4496,58 @@ namespace
             pauseRect->top + controlSize, clientRect.bottom);
     }
 
+    void GetInfoPanelCircleActionRect(
+        HWND infoWindow,
+        RECT *circleRect)
+    {
+        if (!circleRect)
+        {
+            return;
+        }
+
+        SetRectEmpty(circleRect);
+
+        if (!ActiveElements().showCircle ||
+            !infoWindow ||
+            !IsWindow(infoWindow))
+        {
+            return;
+        }
+
+        HWND geometryWindow = infoWindow;
+        if (g_glassTransparentInfoPanelPaint)
+        {
+            HWND hostWindow = GetAncestor(infoWindow, GA_ROOT);
+            if (hostWindow && IsWindow(hostWindow))
+            {
+                geometryWindow = hostWindow;
+            }
+        }
+
+        UINT dpi = GetDpiForWindow(geometryWindow);
+        if (!dpi)
+        {
+            dpi = USER_DEFAULT_SCREEN_DPI;
+        }
+
+        int diameter = ScaleForDpi(kCircleDiameter, dpi);
+        int columnWidth = ScaleForDpi(kCircleColumnWidth, dpi);
+        int ringLeft =
+            (columnWidth - diameter) / 2 +
+            ScaleForDpi(ActiveLayout().circleXOffset, dpi);
+        int ringTop =
+            ScaleForDpi(kCircleHostY + kCircleTop, dpi);
+
+        // Slightly enlarge the hit target beyond the visible ring so the
+        // circle feels easy to click without changing its appearance.
+        int hitPadding = ScaleForDpi(6, dpi);
+
+        circleRect->left = ringLeft - hitPadding;
+        circleRect->top = ringTop - hitPadding;
+        circleRect->right = ringLeft + diameter + hitPadding;
+        circleRect->bottom = ringTop + diameter + hitPadding;
+    }
+
     struct ChildWindowClassLookup
     {
         PCWSTR className;
@@ -4218,7 +4659,14 @@ namespace
 
         // Preserve Explorer's semantic action mechanism after fail-closed
         // runtime class validation. Never synthesize mouse input here.
-        return buttonDefaultAction(element) >= 0;
+        long result = buttonDefaultAction(element);
+
+        Wh_Log(
+            L"custom action=%s DirectUI::Button::DefaultAction result=0x%08X",
+            actionName,
+            static_cast<unsigned int>(result));
+
+        return result >= 0;
     }
 
     bool InvokeNativeActionForTile(OperationTileElement *tile,
@@ -4279,14 +4727,23 @@ namespace
             if (paused)
             {
                 StopCurrentFileAnimation(infoWindow);
+
+                SetTimer(
+                    infoWindow,
+                    kCircleHoverAnimationTimer,
+                    32,
+                    nullptr);
             }
             else
             {
                 PostMessageW(infoWindow, kCurrentFileAnimationMessage, 0, 0);
             }
-            RedrawWindow(
-                infoWindow, nullptr, nullptr,
-                RDW_INVALIDATE | RDW_UPDATENOW);
+
+            // In Glass mode the visible presentation is rendered into the
+            // OperationStatusWindow host, while infoWindow is only the
+            // logical per-tile anchor. Invalidate through the shared helper
+            // so both Glass and normal presentation repaint correctly.
+            InvalidateInfoPanelForTile(tile, false);
         }
     }
 
@@ -4326,13 +4783,10 @@ namespace
 
         bool invoked =
             InvokeNativeActionForTile(tile, elementName, actionName);
-
         if (invoked && isPauseResume && pauseStateResolved)
         {
-            // Explorer's top-level caption is aggregate in multi-op mode, so
-            // it cannot tell us which tile changed. We already invoked the
-            // correct tile's native button; mirror that successful toggle in
-            // the presentation state immediately.
+            // The native DirectUI action has been accepted by Explorer.
+            // Mirror the resulting Pause / Resume state in our presentation.
             SetTilePausedPresentationState(tile, !wasPaused);
         }
 
@@ -4677,6 +5131,7 @@ namespace
              message == g_removeHostSubclassMessage))
         {
             StopCurrentFileAnimation(window);
+            KillTimer(window, kCircleHoverAnimationTimer);
         }
         if (g_removeHostSubclassMessage &&
             message == g_removeHostSubclassMessage)
@@ -4698,6 +5153,45 @@ namespace
             if (wParam == kCurrentFileAnimationTimer)
             {
                 UpdateCurrentFileAnimation(window, true);
+                return 0;
+            }
+
+            if (wParam == kCircleHoverAnimationTimer)
+            {
+                OperationTileElement *tile = nullptr;
+                bool hovered = false;
+                bool paused = false;
+
+                {
+                    std::lock_guard<std::mutex> lock(g_circleMutex);
+
+                    auto it = std::find_if(
+                        g_circles.begin(),
+                        g_circles.end(),
+                        [window](CircleState const &state)
+                        {
+                            return state.infoWindow == window;
+                        });
+
+                    if (it != g_circles.end())
+                    {
+                        tile = it->tile;
+                        hovered = it->circleHovered;
+                        paused = it->pausedStateKnown && it->paused;
+                    }
+                }
+
+                if (!hovered && !paused)
+                {
+                    KillTimer(window, kCircleHoverAnimationTimer);
+                    return 0;
+                }
+
+                if (tile)
+                {
+                    InvalidateInfoPanelForTile(tile, false);
+                }
+
                 return 0;
             }
             break;
@@ -4751,8 +5245,17 @@ namespace
                 GetInfoPanelCancelRect(window, &cancelRect);
                 RECT pauseRect{};
                 GetInfoPanelPauseRect(window, &pauseRect);
+                RECT circleRect{};
+                GetInfoPanelCircleActionRect(window, &circleRect);
+
+                bool overCircle =
+                    PtInRect(&circleRect, point) != FALSE;
+
+                SetCircleHoverState(window, overCircle);
+
                 if (PtInRect(&cancelRect, point) ||
-                    PtInRect(&pauseRect, point))
+                    PtInRect(&pauseRect, point) ||
+                    overCircle)
                 {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
@@ -6644,7 +7147,9 @@ namespace
         // to the operation tile whose visual slot contains the mouse.
         if (IsGlassTheme() &&
             !IsHostInSpecialOperationState(window) &&
-            (message == WM_LBUTTONUP || message == WM_SETCURSOR))
+            (message == WM_LBUTTONUP ||
+             message == WM_SETCURSOR ||
+             message == WM_MOUSEMOVE))
         {
             struct GlassActionEntry
             {
@@ -6673,7 +7178,8 @@ namespace
             POINT point{};
             bool havePoint = false;
 
-            if (message == WM_LBUTTONUP)
+            if (message == WM_LBUTTONUP ||
+                message == WM_MOUSEMOVE)
             {
                 point = {
                     static_cast<short>(LOWORD(lParam)),
@@ -6731,6 +7237,7 @@ namespace
                 {
                     RECT cancelRect{};
                     RECT pauseRect{};
+                    RECT circleRect{};
 
                     bool previousTransparentPaint =
                         g_glassTransparentInfoPanelPaint;
@@ -6740,6 +7247,8 @@ namespace
                         glassInfoActionWindow, &cancelRect);
                     GetInfoPanelPauseRect(
                         glassInfoActionWindow, &pauseRect);
+                    GetInfoPanelCircleActionRect(
+                        glassInfoActionWindow, &circleRect);
 
                     g_glassTransparentInfoPanelPaint =
                         previousTransparentPaint;
@@ -6748,8 +7257,22 @@ namespace
                         PtInRect(&cancelRect, panelPoint) != FALSE;
                     bool overPause =
                         PtInRect(&pauseRect, panelPoint) != FALSE;
+                    bool overCircle =
+                        PtInRect(&circleRect, panelPoint) != FALSE;
 
-                    if (overCancel || overPause)
+                    if (message == WM_SETCURSOR ||
+                        message == WM_MOUSEMOVE)
+                    {
+                        for (GlassActionEntry const &entry : actionEntries)
+                        {
+                            SetCircleHoverState(
+                                entry.infoWindow,
+                                entry.infoWindow == glassInfoActionWindow &&
+                                    overCircle);
+                        }
+                    }
+
+                    if (overCancel || overPause || overCircle)
                     {
                         if (message == WM_SETCURSOR)
                         {
@@ -6758,12 +7281,25 @@ namespace
                             return TRUE;
                         }
 
+                        if (message == WM_MOUSEMOVE)
+                        {
+                            return DefSubclassProc(
+                                window, message, wParam, lParam);
+                        }
+
                         if (overCancel)
                         {
                             InvokeNativeActionFromInfoPanel(
                                 glassInfoActionWindow,
                                 L"eltCancelButton",
                                 L"cancel-top-x");
+                        }
+                        else if (overCircle)
+                        {
+                            InvokeNativeActionFromInfoPanel(
+                                glassInfoActionWindow,
+                                L"eltPauseButton",
+                                L"circle-pause-resume");
                         }
                         else
                         {
