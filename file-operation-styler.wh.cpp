@@ -2215,6 +2215,7 @@ namespace
         // Excludes incomplete registration so ordinary tile activation does
         // not enter the post-conflict measured-rate recovery path.
         bool nativeSpecialState;
+        std::wstring suppressedProgressCaption;
     };
 
     struct HostNativeGeometry
@@ -6489,6 +6490,45 @@ namespace
                it->specialOperationState;
     }
 
+    bool RememberSuppressedProgressCaption(
+        HWND hostWindow,
+        PCWSTR caption)
+    {
+        if (!hostWindow || !caption || !*caption)
+        {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(g_hostPresentationMutex);
+        auto it = std::find_if(
+            g_hostPresentationStates.begin(),
+            g_hostPresentationStates.end(),
+            [hostWindow](HostPresentationState const &state)
+            { return state.hostWindow == hostWindow; });
+
+        if (it == g_hostPresentationStates.end())
+        {
+            return false;
+        }
+
+        it->suppressedProgressCaption = caption;
+        return true;
+    }
+
+    std::wstring GetSuppressedProgressCaption(HWND hostWindow)
+    {
+        std::lock_guard<std::mutex> lock(g_hostPresentationMutex);
+        auto it = std::find_if(
+            g_hostPresentationStates.begin(),
+            g_hostPresentationStates.end(),
+            [hostWindow](HostPresentationState const &state)
+            { return state.hostWindow == hostWindow; });
+
+        return it != g_hostPresentationStates.end()
+                   ? it->suppressedProgressCaption
+                   : std::wstring{};
+    }
+
     void ForgetHostPresentationState(HWND hostWindow)
     {
         std::lock_guard<std::mutex> lock(g_hostPresentationMutex);
@@ -7133,17 +7173,26 @@ namespace
 
             if (LooksLikeNativeProgressCaption(incomingCaption))
             {
+                // Feed Explorer's real caption into lifecycle state
+                // first. Suppress it only when the language-independent
+                // DirectUI state still confirms a normal operation.
                 RefreshHostPresentationStateFromCaption(
                     window, incomingCaption);
 
-                static constexpr wchar_t kEmptyProgressCaption[] = L"";
+                if (!IsHostInSpecialOperationState(window) &&
+                    RememberSuppressedProgressCaption(
+                        window, incomingCaption))
+                {
+                    static constexpr wchar_t
+                        kEmptyProgressCaption[] = L"";
 
-                return DefSubclassProc(
-                    window,
-                    message,
-                    wParam,
-                    reinterpret_cast<LPARAM>(
-                        kEmptyProgressCaption));
+                    return DefSubclassProc(
+                        window,
+                        message,
+                        wParam,
+                        reinterpret_cast<LPARAM>(
+                            kEmptyProgressCaption));
+                }
             }
         }
 
@@ -7191,6 +7240,26 @@ namespace
             if (!DestroyProgressCirclesForHost(window))
             {
                 return FALSE;
+            }
+
+            std::wstring suppressedProgressCaption =
+                GetSuppressedProgressCaption(window);
+
+            if (!suppressedProgressCaption.empty() &&
+                !IsHostInSpecialOperationState(window))
+            {
+                wchar_t currentCaption[2]{};
+                if (GetWindowTextW(
+                        window, currentCaption,
+                        ARRAYSIZE(currentCaption)) == 0)
+                {
+                    DefSubclassProc(
+                        window,
+                        WM_SETTEXT,
+                        0,
+                        reinterpret_cast<LPARAM>(
+                            suppressedProgressCaption.c_str()));
+                }
             }
 
             CancelDeferredDisplaySnapshotsForHost(window);
