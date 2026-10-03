@@ -1708,10 +1708,15 @@ namespace
             return;
         }
 
+        // ACCENT_ENABLE_BLURBEHIND = 3.
+        // Custom Blur uses the classic blur material; Windows Acrylic
+        // remains on the separate SystemBackdrop path above.
+        constexpr int kCustomAccentEnableBlurBehind = 3;
+
         GlassAccentPolicy accentPolicy{};
         accentPolicy.accentState =
             enabled
-                ? kAccentEnableAcrylicBlurBehind
+                ? kCustomAccentEnableBlurBehind
                 : kAccentStateDisabled;
 
         if (enabled)
@@ -1772,6 +1777,73 @@ namespace
             HWND hwnd,
             GlassFrameMargins const *margins);
 
+    using DwmEnableBlurBehindWindow_t =
+        HRESULT(WINAPI *)(
+            HWND hwnd,
+            const DWM_BLURBEHIND *blurBehind);
+
+    void SetGlassDwmBlurRegion(
+        HWND hostWindow,
+        bool enabled)
+    {
+        if (!hostWindow || !IsWindow(hostWindow))
+        {
+            return;
+        }
+
+        HMODULE dwmapi = GetModuleHandleW(L"dwmapi.dll");
+        if (!dwmapi)
+        {
+            dwmapi = LoadLibraryW(L"dwmapi.dll");
+        }
+
+        if (!dwmapi)
+        {
+            return;
+        }
+
+        auto enableBlurBehind =
+            reinterpret_cast<DwmEnableBlurBehindWindow_t>(
+                GetProcAddress(
+                    dwmapi,
+                    "DwmEnableBlurBehindWindow"));
+
+        if (!enableBlurBehind)
+        {
+            return;
+        }
+
+        HRGN blurRegion =
+            enabled
+                ? CreateRectRgn(0, 0, -1, -1)
+                : nullptr;
+
+        DWM_BLURBEHIND blurBehind{};
+        blurBehind.dwFlags =
+            DWM_BB_ENABLE |
+            (enabled ? DWM_BB_BLURREGION : 0);
+        blurBehind.fEnable = enabled ? TRUE : FALSE;
+        blurBehind.hRgnBlur = blurRegion;
+
+        HRESULT result =
+            enableBlurBehind(
+                hostWindow,
+                &blurBehind);
+
+        if (blurRegion)
+        {
+            DeleteObject(blurRegion);
+        }
+
+        if (FAILED(result))
+        {
+            Wh_Log(
+                L"Glass: DwmEnableBlurBehindWindow failed "
+                L"result=0x%08X hwnd=%p",
+                static_cast<unsigned int>(result),
+                reinterpret_cast<void *>(hostWindow));
+        }
+    }
     void SetGlassClientFrameExtension(
         HWND hostWindow,
         bool enabled)
@@ -1897,6 +1969,7 @@ namespace
                 reinterpret_cast<void *>(hostWindow));
         }
 
+        SetGlassDwmBlurRegion(hostWindow, true);
         SetGlassAccentBlurBehind(hostWindow, true);
 
         SetGlassClientFrameExtension(hostWindow, true);
@@ -1986,6 +2059,7 @@ namespace
         if (hadGlassEffect || IsGlassTheme())
         {
             SetGlassAccentBlurBehind(hostWindow, false);
+            SetGlassDwmBlurRegion(hostWindow, false);
             SetGlassClientFrameExtension(hostWindow, false);
         }
 
@@ -7430,6 +7504,23 @@ namespace
                 return 0;
             }
 
+            // Custom Blur needs a transparent host paint surface so the
+            // DWM blur behind the client remains visible. Acrylic keeps
+            // the existing Windows SystemBackdrop composition path.
+            if (g_settings.glassEffect == L"blur")
+            {
+                HRESULT alphaResult =
+                    bp->setAlpha(buffer, &client, 0);
+                if (FAILED(alphaResult))
+                {
+                    Wh_Log(
+                        L"Glass: BufferedPaintSetAlpha failed "
+                        L"result=0x%08X hwnd=%p",
+                        static_cast<unsigned int>(alphaResult),
+                        reinterpret_cast<void *>(window));
+                }
+            }
+
             // The custom paint surface is ready. Only now hide Explorer's
             // native DirectUI presentation so a paint failure can always
             // fall back to usable native content.
@@ -7454,7 +7545,7 @@ namespace
                     // This overlay controls only additional opacity.
                     // Use a quadratic curve so low values stay subtle
                     // instead of quickly turning into a solid color fill.
-                    constexpr int kCustomBlurMaximumOverlayAlpha = 140;
+                    constexpr int kCustomBlurMaximumOverlayAlpha = 90;
 
                     int strength = std::clamp(
                         g_settings.glassStrength,
