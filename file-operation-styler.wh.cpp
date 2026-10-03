@@ -2496,6 +2496,23 @@ namespace
         bool expanded,
         unsigned long long transitionId);
 
+    struct NativeProgressSnapshot
+    {
+        int position;
+        int rangeLow;
+        int rangeHigh;
+        int percent;
+        bool rangeValid;
+    };
+
+    NativeProgressSnapshot ReadNativeProgress(
+        HWND progressWindow,
+        int fallbackPercent);
+    bool EnsureProgressCircle(
+        OperationTileElement *tile,
+        unsigned long long eventId,
+        NativeProgressSnapshot const &progress);
+
     bool ApplyDisplayMode(COperationStatusTile *owner,
                           bool applyFinalHostGeometry,
                           unsigned long long transitionId = 0);
@@ -9816,6 +9833,38 @@ namespace
             it->expanded = expanded;
         }
 
+        HWND nativeProgressWindow =
+            OperationTileElement_GetProgressHWND_Original(state.tile);
+        NativeProgressSnapshot initialProgress =
+            ReadNativeProgress(nativeProgressWindow, 0);
+
+        if (!EnsureProgressCircle(state.tile, 0, initialProgress))
+        {
+            // Keep the native presentation authoritative and allow a
+            // later native update to retry activation.
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto it = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [owner](TransferSummaryState const &candidate)
+                { return candidate.owner == owner; });
+            if (it != g_transferSummaries.end() &&
+                it->tile == state.tile)
+            {
+                it->displayModeKnown = false;
+            }
+            return;
+        }
+
+        HWND hostWindow = GetRegisteredCircleHost(state.tile);
+        if (hostWindow && GetRegisteredTileCountForHost(hostWindow) > 1)
+        {
+            MarkHostForMeasuredMultiRate(hostWindow);
+        }
+        if (hostWindow)
+        {
+            RefreshHostPresentationState(hostWindow);
+        }
+
         unsigned long long transitionId = ++g_displayTransitionSequence;
         ApplyDisplayMode(owner, false, transitionId);
         ScheduleDeferredDisplaySnapshot(owner, transitionId, expanded);
@@ -10183,14 +10232,6 @@ namespace
         }
     }
 
-    struct NativeProgressSnapshot
-    {
-        int position;
-        int rangeLow;
-        int rangeHigh;
-        int percent;
-        bool rangeValid;
-    };
 
     NativeProgressSnapshot ReadNativeProgress(HWND progressWindow,
                                               int fallbackPercent)
@@ -10301,6 +10342,26 @@ namespace
                 InvalidateInfoPanelForTile(tile);
             }
             return true;
+        }
+
+        // A custom presentation must never be activated until Explorer's
+        // native compact/expanded state has been positively identified.
+        // Existing circles may still be refreshed after activation.
+        bool displayModeKnown = false;
+        {
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+            auto transferIt = std::find_if(
+                g_transferSummaries.begin(), g_transferSummaries.end(),
+                [tile](TransferSummaryState const &state)
+                { return state.tile == tile; });
+            displayModeKnown =
+                transferIt != g_transferSummaries.end() &&
+                transferIt->displayModeKnown;
+        }
+
+        if (!displayModeKnown)
+        {
+            return false;
         }
 
         HWND circleWindow = CreateWindowExW(
@@ -11420,30 +11481,15 @@ namespace
             return result;
         }
 
-        HWND nativeProgressWindow =
-            OperationTileElement_GetProgressHWND_Original(operationTile);
-        NativeProgressSnapshot initialProgress =
-            ReadNativeProgress(nativeProgressWindow, 0);
-
-        // Only the top-level HWND is sized. Native DirectUI geometry, fonts,
-        // colors, and parentage are never modified; duplicate normal-mode
-        // visuals are hidden later and restored for native fallback.
+        // Register native state first. Custom HWNDs, Glass, positioning,
+        // and host geometry are activated only after the native display
+        // mode has been positively identified.
         ScopedPresentationActivation activationGuard;
         if (g_unloading.load(std::memory_order_acquire))
         {
             return result;
         }
-        if (!EnsureProgressCircle(operationTile, eventId, initialProgress))
-        {
-            if (!g_unloading.load(std::memory_order_acquire))
-            {
-                Wh_Log(L"eventId=%llu presentation activation failed; "
-                       L"native Explorer presentation retained",
-                       eventId);
-            }
-            return result;
-        }
-        EnsureOperationStatusWindowWidth(eventId);
+
         RegisterTransferSummary(thisPtr, operationTile, operationTileRoot,
                                 state.tileHeaderRoot);
         return result;
