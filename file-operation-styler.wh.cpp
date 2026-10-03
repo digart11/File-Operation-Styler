@@ -65,6 +65,10 @@ Settings changes apply to new file-operation windows; operations already in prog
   $name: Hide small control buttons
   $description: Hide the small Pause / Resume and Cancel controls in the upper-right corner. The progress circle and bottom Cancel button remain available.
 
+- hideTitleBarPercentage: false
+  $name: Hide title-bar percentage
+  $description: Hides the normal progress percentage from the window title. This can also remove progress text from taskbar previews, Alt+Tab, and other Windows UI.
+
 
 - customization:
   - enabled: false
@@ -945,6 +949,7 @@ namespace
     {
         bool customizationEnabled = false;
         bool hideSmallControlButtons = false;
+        bool hideTitleBarPercentage = false;
         std::wstring preset = L"blueDark";
         ThemePalette theme{};
         bool applyNativeColors = false;
@@ -1296,6 +1301,9 @@ namespace
 
         g_settings.hideSmallControlButtons =
             Wh_GetIntSetting(L"hideSmallControlButtons") != 0;
+
+        g_settings.hideTitleBarPercentage =
+            Wh_GetIntSetting(L"hideTitleBarPercentage") != 0;
 
 
         g_settings.customizationEnabled =
@@ -6821,13 +6829,10 @@ namespace
         }
     }
 
-    void RefreshHostPresentationState(HWND hostWindow)
+    void RefreshHostPresentationStateFromCaption(
+        HWND hostWindow,
+        PCWSTR captionHint)
     {
-        wchar_t caption[256]{};
-        PCWSTR captionHint =
-            GetWindowTextW(hostWindow, caption, ARRAYSIZE(caption))
-                ? caption
-                : nullptr;
         bool enteredSpecial = false;
         bool leftSpecial = false;
         bool leftNativeSpecial = false;
@@ -6848,6 +6853,18 @@ namespace
                 leftNativeSpecial ? L"yes" : L"no");
             ScheduleCustomReapplyForHost(hostWindow, leftNativeSpecial);
         }
+    }
+
+    void RefreshHostPresentationState(HWND hostWindow)
+    {
+        wchar_t caption[256]{};
+        PCWSTR captionHint =
+            GetWindowTextW(hostWindow, caption, ARRAYSIZE(caption))
+                ? caption
+                : nullptr;
+
+        RefreshHostPresentationStateFromCaption(
+            hostWindow, captionHint);
     }
 
     struct GlassBufferedPaintApi
@@ -7096,6 +7113,33 @@ namespace
                 message,
                 wParam,
                 lParam);
+        }
+
+        // Optional title cleanup. Feed Explorer's real incoming normal-
+        // progress caption directly to our lifecycle state machine, but
+        // never store or paint that caption when suppression is enabled.
+        // Special/conflict/error captions continue through unchanged.
+        if (message == WM_SETTEXT &&
+            g_settings.hideTitleBarPercentage &&
+            lParam)
+        {
+            PCWSTR incomingCaption =
+                reinterpret_cast<PCWSTR>(lParam);
+
+            if (LooksLikeNativeProgressCaption(incomingCaption))
+            {
+                RefreshHostPresentationStateFromCaption(
+                    window, incomingCaption);
+
+                static constexpr wchar_t kEmptyProgressCaption[] = L"";
+
+                return DefSubclassProc(
+                    window,
+                    message,
+                    wParam,
+                    reinterpret_cast<LPARAM>(
+                        kEmptyProgressCaption));
+            }
         }
 
         if (g_removeHostSubclassMessage &&
