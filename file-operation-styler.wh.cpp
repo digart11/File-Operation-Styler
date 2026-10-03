@@ -4758,11 +4758,6 @@ namespace
         // runtime class validation. Never synthesize mouse input here.
         long result = buttonDefaultAction(element);
 
-        Wh_Log(
-            L"custom action=%s DirectUI::Button::DefaultAction result=0x%08X",
-            actionName,
-            static_cast<unsigned int>(result));
-
         return result >= 0;
     }
 
@@ -6556,22 +6551,18 @@ namespace
 
     void HideCustomPresentationForHost(HWND hostWindow)
     {
-        Wh_Log(L"SPECIAL_FALLBACK hide-custom begin hwnd=%p", hostWindow);
         // Special Explorer states must temporarily leave the
         // full-client Acrylic presentation before native DirectUI
         // becomes visible again.
         if (IsGlassTheme())
         {
-            Wh_Log(L"SPECIAL_FALLBACK reset-chrome hwnd=%p", hostWindow);
             ResetUnifiedHostChrome(hostWindow);
         }
 
-        Wh_Log(L"SPECIAL_FALLBACK restore-native hwnd=%p", hostWindow);
         RestoreNativePresentationForHost(hostWindow);
 
         if (IsGlassTheme())
         {
-            Wh_Log(L"SPECIAL_FALLBACK restore-glass-dui hwnd=%p", hostWindow);
             RestoreGlassDirectUiForHost(hostWindow);
         }
         if (ShouldApplyNativeColorOverrides())
@@ -6842,15 +6833,12 @@ namespace
 
         if (enteredSpecial)
         {
-            Wh_Log(L"SPECIAL_STATE entered hwnd=%p", hostWindow);
+
             HideCustomPresentationForHost(hostWindow);
         }
         else if (leftSpecial)
         {
-            Wh_Log(
-                L"SPECIAL_STATE left hwnd=%p nativeSpecial=%s",
-                hostWindow,
-                leftNativeSpecial ? L"yes" : L"no");
+
             ScheduleCustomReapplyForHost(hostWindow, leftNativeSpecial);
         }
     }
@@ -9775,10 +9763,6 @@ namespace
                    ValidateNormalProgressHierarchy(elements, 0, false));
         if (!hierarchyValid)
         {
-            Wh_Log(L"INITIAL_MODE owner=%p result=skipped "
-                   L"reason=unsupported-layout deleteLike=%s",
-                   reinterpret_cast<void *>(owner),
-                   deleteLike ? L"yes" : L"no");
             return;
         }
 
@@ -9813,11 +9797,6 @@ namespace
 
         if (!nativeCompact && !nativeExpanded)
         {
-            Wh_Log(
-                L"INITIAL_MODE owner=%p result=skipped "
-                L"reason=unrecognized-native-visibility deleteLike=%s",
-                reinterpret_cast<void *>(owner),
-                deleteLike ? L"yes" : L"no");
             return;
         }
 
