@@ -4080,6 +4080,8 @@ namespace
                                    255, GetRValue(theme.actionText), GetGValue(theme.actionText),
                                    GetBValue(theme.actionText)),
                                static_cast<Gdiplus::REAL>(ScaleForDpi(2, dpi)));
+        if (!g_settings.hideSmallControlButtons)
+        {
         Gdiplus::REAL actionCenterX =
             static_cast<Gdiplus::REAL>(pauseRect.left + pauseRect.right) /
             2.0f;
@@ -4121,7 +4123,10 @@ namespace
                               actionCenterY + actionHalfHeight);
         }
 
-        if (elements.showCancel)
+        }
+
+        if (!g_settings.hideSmallControlButtons &&
+            elements.showCancel)
         {
             RECT cancelRect{};
             GetInfoPanelCancelRect(infoWindow, &cancelRect);
@@ -4424,6 +4429,11 @@ namespace
         }
         SetRectEmpty(cancelRect);
 
+        if (g_settings.hideSmallControlButtons)
+        {
+            return;
+        }
+
         RECT clientRect{};
         HWND geometryWindow = infoWindow;
         if (g_glassTransparentInfoPanelPaint)
@@ -4459,6 +4469,11 @@ namespace
             return;
         }
         SetRectEmpty(pauseRect);
+
+        if (g_settings.hideSmallControlButtons)
+        {
+            return;
+        }
 
         RECT clientRect{};
         HWND geometryWindow = infoWindow;
