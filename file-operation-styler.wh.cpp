@@ -2,12 +2,12 @@
 // @id              file-operation-styler2
 // @name            File Operation Styler2
 // @description     Portable custom presentation for native Explorer file operations with a skin-safe unified presentation.
-// @version         1.1.0
+// @version         1.2.0
 // @author          digART
 // @github          https://github.com/digart11
 // @license         GPL-3.0
 // @include         explorer.exe
-// @architecture    x86-64
+// @architecture    amd64
 // @compilerOptions -lcomctl32 -lgdi32 -lgdiplus -lshlwapi -ladvapi32
 // ==/WindhawkMod==
 
