@@ -6474,18 +6474,22 @@ namespace
 
     void HideCustomPresentationForHost(HWND hostWindow)
     {
+        Wh_Log(L"SPECIAL_FALLBACK hide-custom begin hwnd=%p", hostWindow);
         // Special Explorer states must temporarily leave the
         // full-client Acrylic presentation before native DirectUI
         // becomes visible again.
         if (IsGlassTheme())
         {
+            Wh_Log(L"SPECIAL_FALLBACK reset-chrome hwnd=%p", hostWindow);
             ResetUnifiedHostChrome(hostWindow);
         }
 
+        Wh_Log(L"SPECIAL_FALLBACK restore-native hwnd=%p", hostWindow);
         RestoreNativePresentationForHost(hostWindow);
 
         if (IsGlassTheme())
         {
+            Wh_Log(L"SPECIAL_FALLBACK restore-glass-dui hwnd=%p", hostWindow);
             RestoreGlassDirectUiForHost(hostWindow);
         }
         if (ShouldApplyNativeColorOverrides())
@@ -6759,10 +6763,15 @@ namespace
 
         if (enteredSpecial)
         {
+            Wh_Log(L"SPECIAL_STATE entered hwnd=%p", hostWindow);
             HideCustomPresentationForHost(hostWindow);
         }
         else if (leftSpecial)
         {
+            Wh_Log(
+                L"SPECIAL_STATE left hwnd=%p nativeSpecial=%s",
+                hostWindow,
+                leftNativeSpecial ? L"yes" : L"no");
             ScheduleCustomReapplyForHost(hostWindow, leftNativeSpecial);
         }
     }
