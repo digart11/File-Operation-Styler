@@ -29,6 +29,16 @@ File Operation Styler gives copy, move, delete, and recycle operations a cleaner
 ### Themes
 
 ![File Operation Styler Themes](https://raw.githubusercontent.com/digart11/File-Operation-Styler/master/images/file-operation-styler-themes.png)
+## What's new in 1.2.0
+
+- Added a Frosted Glass theme with Windows Acrylic and Custom Blur styles.
+- Added current-file progress while the circular indicator continues to show overall operation progress.
+- Added interactive Pause / Resume behavior to the large progress circle.
+- Added options to hide the small action controls and title-bar progress text.
+- Improved multiple-operation support, including synchronized More / Fewer Details behavior.
+- Improved fallback to the native Windows UI for conflicts, errors, and unsupported presentation states.
+- Improved restoration and teardown when the mod is disabled, reloaded, or settings are changed.
+
 ## Features
 
 - Modern copy and move progress window
