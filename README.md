@@ -20,7 +20,7 @@ The large progress circle can pause and resume operations, while optional settin
 
 ### Themes
 
-![File Operation Styler Themes](images/file-operation-styler-themes.png)
+![File Operation Styler Themes](images/file-operation-styler-themes-1.2.png)
 
 ## What's new in 1.2.0
 
