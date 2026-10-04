@@ -3511,185 +3511,303 @@ namespace
         }
         else
         {
-            // Paused / resume state.
-            Gdiplus::REAL playScale =
-                static_cast<Gdiplus::REAL>(
-                    1.0 +
-                    interactionWave * 0.12);
-
-            Gdiplus::REAL playCenterY =
-                centerY -
-                static_cast<Gdiplus::REAL>(
-                    ScaleForDpi(5, dpi));
-
-            Gdiplus::REAL halfHeight =
-                static_cast<Gdiplus::REAL>(
-                    ScaleForDpi(22, dpi)) *
-                playScale;
-
-            Gdiplus::REAL halfWidth =
-                static_cast<Gdiplus::REAL>(
-                    ScaleForDpi(18, dpi)) *
-                playScale;
-
-            Gdiplus::PointF playPoints[3] =
+            // Paused operation.
+            // Away from the mouse this is a STATE indicator:
+            // Pause icon + "Paused". Hover changes the whole center
+            // immediately into the available ACTION: Play + "Resume".
+            if (!hovered)
             {
-                {
-                    centerX - halfWidth * 0.58f,
-                    playCenterY - halfHeight
-                },
-                {
-                    centerX - halfWidth * 0.58f,
-                    playCenterY + halfHeight
-                },
-                {
-                    centerX + halfWidth,
-                    playCenterY
-                }
-            };
-
-            BYTE outerGlowAlpha =
-                static_cast<BYTE>(
-                    30 +
-                    interactionWave * 16);
-
-            BYTE innerGlowAlpha =
-                static_cast<BYTE>(
-                    56 +
-                    interactionWave * 18);
-
-            Gdiplus::Pen playOuterGlow(
-                Gdiplus::Color(
-                    outerGlowAlpha,
-                    GetRValue(theme.accent),
-                    GetGValue(theme.accent),
-                    GetBValue(theme.accent)),
-                static_cast<Gdiplus::REAL>(
-                    ScaleForDpi(10, dpi)));
-
-            playOuterGlow.SetLineJoin(
-                Gdiplus::LineJoinRound);
-
-            graphics.DrawPolygon(
-                &playOuterGlow,
-                playPoints,
-                ARRAYSIZE(playPoints));
-
-            Gdiplus::Pen playInnerGlow(
-                Gdiplus::Color(
-                    innerGlowAlpha,
-                    GetRValue(theme.primaryText),
-                    GetGValue(theme.primaryText),
-                    GetBValue(theme.primaryText)),
-                static_cast<Gdiplus::REAL>(
-                    ScaleForDpi(5, dpi)));
-
-            playInnerGlow.SetLineJoin(
-                Gdiplus::LineJoinRound);
-
-            graphics.DrawPolygon(
-                &playInnerGlow,
-                playPoints,
-                ARRAYSIZE(playPoints));
-
-            Gdiplus::SolidBrush playBrush(
-                Gdiplus::Color(
-                    230,
-                    GetRValue(theme.primaryText),
-                    GetGValue(theme.primaryText),
-                    GetBValue(theme.primaryText)));
-
-            graphics.FillPolygon(
-                &playBrush,
-                playPoints,
-                ARRAYSIZE(playPoints));
-
-            // Soft rounded edge so the Play symbol visually matches the
-            // rounded Pause bars without changing its basic geometry.
-            Gdiplus::Pen playRoundedEdge(
-                Gdiplus::Color(
-                    230,
-                    GetRValue(theme.primaryText),
-                    GetGValue(theme.primaryText),
-                    GetBValue(theme.primaryText)),
-                static_cast<Gdiplus::REAL>(
-                    ScaleForDpi(4, dpi)));
-
-            playRoundedEdge.SetLineJoin(
-                Gdiplus::LineJoinRound);
-
-            graphics.DrawPolygon(
-                &playRoundedEdge,
-                playPoints,
-                ARRAYSIZE(playPoints));
-
-            Gdiplus::Pen playHighlight(
-                Gdiplus::Color(
-                    110,
-                    255,
-                    255,
-                    255),
-                static_cast<Gdiplus::REAL>(
-                    ScaleForDpi(1, dpi)));
-
-            playHighlight.SetLineJoin(
-                Gdiplus::LineJoinRound);
-
-            graphics.DrawPolygon(
-                &playHighlight,
-                playPoints,
-                ARRAYSIZE(playPoints));
-
-            if (ActiveElements().showCompleteLabel)
-            {
-                Gdiplus::Font resumeFont(
-                    type.circleLabelFont.c_str(),
+                Gdiplus::REAL iconScale =
                     static_cast<Gdiplus::REAL>(
-                        ScaleForDpi(
-                            type.circleLabelSize + 1,
-                            dpi)),
-                    Gdiplus::FontStyleBold,
-                    Gdiplus::UnitPixel);
+                        0.88 + interactionWave * 0.16);
 
-                Gdiplus::Font resumeFallback(
-                    L"Segoe UI",
+                Gdiplus::REAL pauseCenterY =
+                    centerY -
                     static_cast<Gdiplus::REAL>(
-                        ScaleForDpi(
-                            type.circleLabelSize + 1,
-                            dpi)),
-                    Gdiplus::FontStyleBold,
-                    Gdiplus::UnitPixel);
+                        ScaleForDpi(5, dpi));
 
-                Gdiplus::Font *selectedResumeFont =
-                    resumeFont.GetLastStatus() ==
-                            Gdiplus::Ok
-                        ? &resumeFont
-                        : &resumeFallback;
-
-                Gdiplus::RectF resumeBounds(
-                    ringLeft,
-                    ringTop +
-                        diameter * 0.70f,
-                    diameter,
+                Gdiplus::REAL halfHeight =
                     static_cast<Gdiplus::REAL>(
-                        ScaleForDpi(21, dpi)));
+                        ScaleForDpi(18, dpi)) *
+                    iconScale;
 
-                Gdiplus::SolidBrush resumeBrush(
+                Gdiplus::REAL barOffset =
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(7, dpi)) *
+                    iconScale;
+
+                BYTE outerGlowAlpha =
+                    static_cast<BYTE>(
+                        22 + interactionWave * 30);
+
+                Gdiplus::Pen pauseOuterGlow(
                     Gdiplus::Color(
-                        210,
+                        outerGlowAlpha,
+                        GetRValue(theme.accent),
+                        GetGValue(theme.accent),
+                        GetBValue(theme.accent)),
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(10, dpi)));
+
+                pauseOuterGlow.SetStartCap(
+                    Gdiplus::LineCapRound);
+                pauseOuterGlow.SetEndCap(
+                    Gdiplus::LineCapRound);
+
+                Gdiplus::Pen pausePen(
+                    Gdiplus::Color(
+                        225,
+                        GetRValue(theme.primaryText),
+                        GetGValue(theme.primaryText),
+                        GetBValue(theme.primaryText)),
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(7, dpi)));
+
+                pausePen.SetStartCap(
+                    Gdiplus::LineCapRound);
+                pausePen.SetEndCap(
+                    Gdiplus::LineCapRound);
+
+                auto drawPausedBars =
+                    [&](Gdiplus::Pen *pen)
+                {
+                    graphics.DrawLine(
+                        pen,
+                        centerX - barOffset,
+                        pauseCenterY - halfHeight,
+                        centerX - barOffset,
+                        pauseCenterY + halfHeight);
+
+                    graphics.DrawLine(
+                        pen,
+                        centerX + barOffset,
+                        pauseCenterY - halfHeight,
+                        centerX + barOffset,
+                        pauseCenterY + halfHeight);
+                };
+
+                drawPausedBars(&pauseOuterGlow);
+                drawPausedBars(&pausePen);
+
+                if (ActiveElements().showCompleteLabel)
+                {
+                    Gdiplus::Font pausedFont(
+                        type.circleLabelFont.c_str(),
+                        static_cast<Gdiplus::REAL>(
+                            ScaleForDpi(
+                                type.circleLabelSize + 1,
+                                dpi)),
+                        Gdiplus::FontStyleBold,
+                        Gdiplus::UnitPixel);
+
+                    Gdiplus::Font pausedFallback(
+                        L"Segoe UI",
+                        static_cast<Gdiplus::REAL>(
+                            ScaleForDpi(
+                                type.circleLabelSize + 1,
+                                dpi)),
+                        Gdiplus::FontStyleBold,
+                        Gdiplus::UnitPixel);
+
+                    Gdiplus::Font *selectedPausedFont =
+                        pausedFont.GetLastStatus() == Gdiplus::Ok
+                            ? &pausedFont
+                            : &pausedFallback;
+
+                    Gdiplus::RectF pausedBounds(
+                        ringLeft,
+                        ringTop + diameter * 0.70f,
+                        diameter,
+                        static_cast<Gdiplus::REAL>(
+                            ScaleForDpi(21, dpi)));
+
+                    Gdiplus::SolidBrush pausedBrush(
+                        Gdiplus::Color(
+                            210,
+                            GetRValue(theme.primaryText),
+                            GetGValue(theme.primaryText),
+                            GetBValue(theme.primaryText)));
+
+                    graphics.DrawString(
+                        L"Paused",
+                        -1,
+                        selectedPausedFont,
+                        pausedBounds,
+                        &centeredText,
+                        &pausedBrush);
+                }
+            }
+            else
+            {
+                // Hover is an immediate action preview.
+                // No interpolation: icon and text change together.
+                Gdiplus::REAL playScale =
+                    static_cast<Gdiplus::REAL>(
+                        0.94 + interactionWave * 0.12);
+
+                Gdiplus::REAL playCenterY =
+                    centerY -
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(5, dpi));
+
+                Gdiplus::REAL halfHeight =
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(23, dpi)) *
+                    playScale;
+
+                Gdiplus::REAL halfWidth =
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(19, dpi)) *
+                    playScale;
+
+                Gdiplus::PointF playPoints[3] =
+                {
+                    {
+                        centerX - halfWidth * 0.58f,
+                        playCenterY - halfHeight
+                    },
+                    {
+                        centerX - halfWidth * 0.58f,
+                        playCenterY + halfHeight
+                    },
+                    {
+                        centerX + halfWidth,
+                        playCenterY
+                    }
+                };
+
+                Gdiplus::Pen playOuterGlow(
+                    Gdiplus::Color(
+                        static_cast<BYTE>(
+                            32 + interactionWave * 28),
+                        GetRValue(theme.accent),
+                        GetGValue(theme.accent),
+                        GetBValue(theme.accent)),
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(10, dpi)));
+
+                playOuterGlow.SetLineJoin(
+                    Gdiplus::LineJoinRound);
+
+                graphics.DrawPolygon(
+                    &playOuterGlow,
+                    playPoints,
+                    ARRAYSIZE(playPoints));
+
+                Gdiplus::Pen playInnerGlow(
+                    Gdiplus::Color(
+                        static_cast<BYTE>(
+                            60 + interactionWave * 28),
+                        GetRValue(theme.primaryText),
+                        GetGValue(theme.primaryText),
+                        GetBValue(theme.primaryText)),
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(5, dpi)));
+
+                playInnerGlow.SetLineJoin(
+                    Gdiplus::LineJoinRound);
+
+                graphics.DrawPolygon(
+                    &playInnerGlow,
+                    playPoints,
+                    ARRAYSIZE(playPoints));
+
+                Gdiplus::SolidBrush playBrush(
+                    Gdiplus::Color(
+                        230,
                         GetRValue(theme.primaryText),
                         GetGValue(theme.primaryText),
                         GetBValue(theme.primaryText)));
 
-                graphics.DrawString(
-                    L"Resume",
-                    -1,
-                    selectedResumeFont,
-                    resumeBounds,
-                    &centeredText,
-                    &resumeBrush);
+                graphics.FillPolygon(
+                    &playBrush,
+                    playPoints,
+                    ARRAYSIZE(playPoints));
+
+                Gdiplus::Pen playRoundedEdge(
+                    Gdiplus::Color(
+                        230,
+                        GetRValue(theme.primaryText),
+                        GetGValue(theme.primaryText),
+                        GetBValue(theme.primaryText)),
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(4, dpi)));
+
+                playRoundedEdge.SetLineJoin(
+                    Gdiplus::LineJoinRound);
+
+                graphics.DrawPolygon(
+                    &playRoundedEdge,
+                    playPoints,
+                    ARRAYSIZE(playPoints));
+
+                Gdiplus::Pen playHighlight(
+                    Gdiplus::Color(
+                        110,
+                        255,
+                        255,
+                        255),
+                    static_cast<Gdiplus::REAL>(
+                        ScaleForDpi(1, dpi)));
+
+                playHighlight.SetLineJoin(
+                    Gdiplus::LineJoinRound);
+
+                graphics.DrawPolygon(
+                    &playHighlight,
+                    playPoints,
+                    ARRAYSIZE(playPoints));
+
+                if (ActiveElements().showCompleteLabel)
+                {
+                    Gdiplus::Font resumeFont(
+                        type.circleLabelFont.c_str(),
+                        static_cast<Gdiplus::REAL>(
+                            ScaleForDpi(
+                                type.circleLabelSize + 1,
+                                dpi)),
+                        Gdiplus::FontStyleBold,
+                        Gdiplus::UnitPixel);
+
+                    Gdiplus::Font resumeFallback(
+                        L"Segoe UI",
+                        static_cast<Gdiplus::REAL>(
+                            ScaleForDpi(
+                                type.circleLabelSize + 1,
+                                dpi)),
+                        Gdiplus::FontStyleBold,
+                        Gdiplus::UnitPixel);
+
+                    Gdiplus::Font *selectedResumeFont =
+                        resumeFont.GetLastStatus() == Gdiplus::Ok
+                            ? &resumeFont
+                            : &resumeFallback;
+
+                    Gdiplus::RectF resumeBounds(
+                        ringLeft,
+                        ringTop + diameter * 0.70f,
+                        diameter,
+                        static_cast<Gdiplus::REAL>(
+                            ScaleForDpi(21, dpi)));
+
+                    Gdiplus::SolidBrush resumeBrush(
+                        Gdiplus::Color(
+                            210,
+                            GetRValue(theme.primaryText),
+                            GetGValue(theme.primaryText),
+                            GetBValue(theme.primaryText)));
+
+                    graphics.DrawString(
+                        L"Resume",
+                        -1,
+                        selectedResumeFont,
+                        resumeBounds,
+                        &centeredText,
+                        &resumeBrush);
+                }
             }
         }
+
     }
 
     void DrawInfoPanelFrame(HWND infoWindow,
