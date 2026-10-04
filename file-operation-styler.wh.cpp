@@ -3227,6 +3227,32 @@ namespace
         }
     }
 
+    void ClearCircleHoverStatesForHost(HWND hostWindow)
+    {
+        if (!hostWindow)
+        {
+            return;
+        }
+
+        std::vector<HWND> infoWindows;
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+            for (CircleState const &state : g_circles)
+            {
+                if (state.hostWindow == hostWindow &&
+                    state.infoWindow)
+                {
+                    infoWindows.push_back(state.infoWindow);
+                }
+            }
+        }
+
+        for (HWND infoWindow : infoWindows)
+        {
+            SetCircleHoverState(infoWindow, false);
+        }
+    }
+
     void DrawEmbeddedProgressCircle(Gdiplus::Graphics &graphics,
                                     UINT dpi,
                                     double displayProgress,
@@ -5343,8 +5369,42 @@ namespace
                     window, L"eltPauseButton", L"pause-resume");
                 return 0;
             }
+
+            RECT circleRect{};
+            GetInfoPanelCircleActionRect(window, &circleRect);
+            if (PtInRect(&circleRect, point))
+            {
+                InvokeNativeActionFromInfoPanel(
+                    window,
+                    L"eltPauseButton",
+                    L"circle-pause-resume");
+                return 0;
+            }
+
             return 0;
         }
+        case WM_MOUSEMOVE:
+        {
+            TRACKMOUSEEVENT tracking{};
+            tracking.cbSize = sizeof(tracking);
+            tracking.dwFlags = TME_LEAVE;
+            tracking.hwndTrack = window;
+            TrackMouseEvent(&tracking);
+
+            POINT point{
+                static_cast<short>(LOWORD(lParam)),
+                static_cast<short>(HIWORD(lParam))};
+            RECT circleRect{};
+            GetInfoPanelCircleActionRect(window, &circleRect);
+
+            SetCircleHoverState(
+                window,
+                PtInRect(&circleRect, point) != FALSE);
+            break;
+        }
+        case WM_MOUSELEAVE:
+            SetCircleHoverState(window, false);
+            return 0;
         case WM_SETCURSOR:
         {
             POINT point{};
@@ -7358,6 +7418,11 @@ namespace
             return 1;
         }
 
+        if (IsGlassTheme() && message == WM_MOUSELEAVE)
+        {
+            ClearCircleHoverStatesForHost(window);
+        }
+
         // In Glass mode the info panels are painted into the shared host
         // instead of shown as interactive child windows. Route Pause/Cancel
         // to the operation tile whose visual slot contains the mouse.
@@ -7367,6 +7432,14 @@ namespace
              message == WM_SETCURSOR ||
              message == WM_MOUSEMOVE))
         {
+            if (message == WM_MOUSEMOVE)
+            {
+                TRACKMOUSEEVENT tracking{};
+                tracking.cbSize = sizeof(tracking);
+                tracking.dwFlags = TME_LEAVE;
+                tracking.hwndTrack = window;
+                TrackMouseEvent(&tracking);
+            }
             struct GlassActionEntry
             {
                 OperationTileElement *tile = nullptr;
@@ -7529,6 +7602,16 @@ namespace
                     }
                 }
             }
+        }
+
+        // If Glass routing reached this point, the pointer did not
+        // remain over an actionable circle. Clear any tile that was
+        // left hovered by a previous routed mouse message.
+        if (IsGlassTheme() &&
+            (message == WM_SETCURSOR ||
+             message == WM_MOUSEMOVE))
+        {
+            ClearCircleHoverStatesForHost(window);
         }
 
         LRESULT footerResult = 0;
