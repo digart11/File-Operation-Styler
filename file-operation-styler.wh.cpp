@@ -7725,6 +7725,7 @@ namespace
             // The custom paint surface is ready. Only now hide Explorer's
             // native DirectUI presentation so a paint failure can always
             // fall back to usable native content.
+            std::vector<HWND> hiddenDirectUiWindows;
             HWND directUi = nullptr;
             while ((directUi = FindWindowExW(
                         window,
@@ -7735,6 +7736,10 @@ namespace
                 if (IsWindowVisible(directUi))
                 {
                     ShowWindow(directUi, SW_HIDE);
+                    if (!IsWindowVisible(directUi))
+                    {
+                        hiddenDirectUiWindows.push_back(directUi);
+                    }
                 }
             }
 
@@ -7867,9 +7872,55 @@ namespace
 
                 DrawGlassHostFooter(window, bufferDc);
 
-                bp->end(
-                    buffer,
-                    TRUE);
+                HRESULT commitResult =
+                    bp->end(buffer, TRUE);
+
+                if (FAILED(commitResult))
+                {
+                    Wh_Log(
+                        L"Glass: EndBufferedPaint commit failed "
+                        L"result=0x%08X hwnd=%p",
+                        static_cast<unsigned int>(commitResult),
+                        reinterpret_cast<void *>(window));
+
+                    for (HWND hiddenDirectUi : hiddenDirectUiWindows)
+                    {
+                        if (!hiddenDirectUi ||
+                            !IsWindow(hiddenDirectUi) ||
+                            GetParent(hiddenDirectUi) != window)
+                        {
+                            continue;
+                        }
+
+                        wchar_t className[32]{};
+                        if (!GetClassNameW(
+                                hiddenDirectUi,
+                                className,
+                                ARRAYSIZE(className)) ||
+                            lstrcmpW(
+                                className,
+                                L"DirectUIHWND") != 0)
+                        {
+                            continue;
+                        }
+
+                        if (!IsWindowVisible(hiddenDirectUi))
+                        {
+                            ShowWindow(
+                                hiddenDirectUi,
+                                SW_SHOWNA);
+                        }
+
+                        InvalidateRect(
+                            hiddenDirectUi,
+                            nullptr,
+                            TRUE);
+                    }
+
+                    bp->uninit();
+                    EndPaint(window, &paint);
+                    return 0;
+                }
             }
 
             bp->uninit();
