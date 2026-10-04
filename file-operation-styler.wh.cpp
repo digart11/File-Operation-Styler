@@ -129,7 +129,7 @@ Settings changes apply to new file-operation windows; operations already in prog
     $name: Solid footer custom color
     $description: Used only when Solid footer color preset is Custom. Enter a hex color such as #1C3346.
     #! $format: colorRgb
-    #! $showIf: {preset: glass, footerStyle: solid}
+    #! $showIf: {preset: glass, footerStyle: solid, footerColorPreset: custom}
   - colors:
     - backgroundOverride: ""
       $name: Background
@@ -12046,7 +12046,7 @@ namespace
 BOOL Wh_ModInit()
 {
     g_unloading.store(false, std::memory_order_release);
-    Wh_Log(L"File Operation Styler 1.1.0 initialization started");
+    Wh_Log(L"File Operation Styler 1.2.0 initialization started");
 
     LoadSettings();
 
@@ -12063,7 +12063,7 @@ BOOL Wh_ModInit()
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 1.1.0 initialization complete");
+    Wh_Log(L"File Operation Styler 1.2.0 initialization complete");
     return TRUE;
 }
 
@@ -12074,7 +12074,7 @@ void Wh_ModBeforeUninit()
         return;
     }
 
-    Wh_Log(L"File Operation Styler 1.1.0 presentation teardown started");
+    Wh_Log(L"File Operation Styler 1.2.0 presentation teardown started");
     {
         std::unique_lock<std::mutex> lock(g_presentationActivationMutex);
         g_presentationActivationCondition.wait(
@@ -12082,7 +12082,7 @@ void Wh_ModBeforeUninit()
             { return g_presentationActivations == 0; });
     }
     DestroyAllProgressCircles();
-    Wh_Log(L"File Operation Styler 1.1.0 presentation teardown complete");
+    Wh_Log(L"File Operation Styler 1.2.0 presentation teardown complete");
 }
 
 void Wh_ModUninit()
@@ -12098,7 +12098,7 @@ void Wh_ModUninit()
     ShutdownSharedProgressBridge();
     ShutdownGlassBufferedPaintApi();
     ShutdownDwmApi();
-    Wh_Log(L"File Operation Styler 1.1.0 uninitialization complete");
+    Wh_Log(L"File Operation Styler 1.2.0 uninitialization complete");
 }
 
 BOOL Wh_ModSettingsChanged(BOOL *bReload)
