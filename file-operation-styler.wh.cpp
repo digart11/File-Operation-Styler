@@ -10432,27 +10432,92 @@ namespace
                            bool expanded,
                            unsigned long long transitionId)
     {
-        bool recorded = false;
+        OperationTileElement *sourceTile = nullptr;
+
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
             auto it = std::find_if(
-                g_transferSummaries.begin(), g_transferSummaries.end(),
+                g_transferSummaries.begin(),
+                g_transferSummaries.end(),
                 [owner](TransferSummaryState const &state)
                 { return state.owner == owner; });
-            if (it != g_transferSummaries.end() && it->tile &&
-                it->operationTileRoot)
+
+            if (it == g_transferSummaries.end() ||
+                !it->tile ||
+                !it->operationTileRoot)
             {
-                it->displayModeKnown = true;
-                it->expanded = expanded;
-                recorded = true;
+                return;
+            }
+
+            sourceTile = it->tile;
+        }
+
+        HWND hostWindow =
+            GetRegisteredCircleHost(sourceTile);
+
+        std::vector<OperationTileElement *> hostTiles;
+
+        if (hostWindow)
+        {
+            std::lock_guard<std::mutex> lock(g_circleMutex);
+
+            for (CircleState const &circle : g_circles)
+            {
+                if (circle.hostWindow == hostWindow &&
+                    circle.tile)
+                {
+                    hostTiles.push_back(circle.tile);
+                }
             }
         }
-        if (recorded)
+
+        std::vector<COperationStatusTile *> ownersToApply;
+
         {
-            ApplyDisplayMode(owner, false, transitionId);
+            std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
+
+            for (TransferSummaryState &state :
+                 g_transferSummaries)
+            {
+                bool sameHost =
+                    !hostTiles.empty() &&
+                    std::find(
+                        hostTiles.begin(),
+                        hostTiles.end(),
+                        state.tile) != hostTiles.end();
+
+                // If host lookup unexpectedly failed, preserve the
+                // previous single-owner behavior instead of changing
+                // unrelated transfer state.
+                bool sourceOwnerFallback =
+                    hostTiles.empty() &&
+                    state.owner == owner;
+
+                if ((!sameHost && !sourceOwnerFallback) ||
+                    !state.owner ||
+                    !state.tile ||
+                    !state.operationTileRoot)
+                {
+                    continue;
+                }
+
+                state.displayModeKnown = true;
+                state.expanded = expanded;
+                ownersToApply.push_back(state.owner);
+            }
+        }
+
+        // Re-layout every custom tile in this host. Do this outside
+        // the state locks because ApplyDisplayMode performs window
+        // and DirectUI work.
+        for (COperationStatusTile *affectedOwner : ownersToApply)
+        {
+            ApplyDisplayMode(
+                affectedOwner,
+                false,
+                transitionId);
         }
     }
-
     void RecordTransferBytes(COperationStatusTile *owner,
                              unsigned long long completedItems,
                              unsigned long long totalItems,
