@@ -584,6 +584,7 @@ namespace
         bool measuredSampleInitialized = false;
         bool resumedFromSpecialState = false;
         std::vector<double> nativeRateHistory;
+        std::vector<DirectUI::Element *> nativeElementsHiddenByMod;
     };
 
     std::mutex g_transferSummaryMutex;
@@ -6605,18 +6606,14 @@ namespace
         TransferSummaryState const &state,
         bool customNormalMode)
     {
-        if (!Element_SetVisible_Original || !state.operationTileRoot)
+        if (!Element_GetVisible_Original ||
+            !Element_SetVisible_Original ||
+            !state.tile ||
+            !state.operationTileRoot)
         {
             return;
         }
 
-        auto setVisible = [](DirectUI::Element *element, bool visible)
-        {
-            if (element)
-            {
-                Element_SetVisible_Original(element, visible);
-            }
-        };
         auto find = [&state](PCWSTR name, bool headerFallback = false)
         {
             return FindSkinElement(
@@ -6624,30 +6621,218 @@ namespace
                 name, headerFallback);
         };
 
+        std::vector<DirectUI::Element *> elements{
+            state.tileHeaderRoot,
+            find(L"eltSummary"),
+            find(L"eltDetails"),
+            find(L"eltChartArea"),
+            find(L"eltRateChart_New"),
+            find(L"eltProgressBarContainer"),
+            find(L"eltProgressBar")};
+
         if (customNormalMode)
         {
-            setVisible(state.tileHeaderRoot, false);
-            setVisible(find(L"eltSummary"), false);
-            setVisible(find(L"eltDetails"), false);
-            setVisible(find(L"eltChartArea"), false);
-            setVisible(find(L"eltRateChart_New"), false);
-            setVisible(find(L"eltProgressBarContainer"), false);
-            setVisible(find(L"eltProgressBar"), false);
+            std::vector<DirectUI::Element *> alreadyOwned;
+            {
+                std::lock_guard<std::mutex> lock(
+                    g_transferSummaryMutex);
+
+                auto it = std::find_if(
+                    g_transferSummaries.begin(),
+                    g_transferSummaries.end(),
+                    [&state](TransferSummaryState const &candidate)
+                    {
+                        return candidate.tile == state.tile &&
+                               candidate.operationTileRoot ==
+                                   state.operationTileRoot;
+                    });
+
+                if (it == g_transferSummaries.end())
+                {
+                    return;
+                }
+
+                alreadyOwned = it->nativeElementsHiddenByMod;
+            }
+
+            std::vector<DirectUI::Element *> newlyHidden;
+
+            for (DirectUI::Element *element : elements)
+            {
+                if (!element)
+                {
+                    continue;
+                }
+
+                bool owned =
+                    std::find(
+                        alreadyOwned.begin(),
+                        alreadyOwned.end(),
+                        element) != alreadyOwned.end();
+
+                if (owned)
+                {
+                    // Explorer may have made an element visible again
+                    // during an unrelated native refresh. We still own
+                    // its original visible state, so suppress it again
+                    // without changing the saved restoration record.
+                    if (Element_GetVisible_Original(element))
+                    {
+                        Element_SetVisible_Original(element, false);
+                    }
+                    continue;
+                }
+
+                if (!Element_GetVisible_Original(element))
+                {
+                    // It was already hidden by Explorer. Do not claim
+                    // ownership and never force it visible later.
+                    continue;
+                }
+
+                HRESULT result =
+                    Element_SetVisible_Original(element, false);
+
+                if (SUCCEEDED(result))
+                {
+                    newlyHidden.push_back(element);
+                }
+            }
+
+            if (newlyHidden.empty())
+            {
+                return;
+            }
+
+            bool stateStillLive = false;
+            {
+                std::lock_guard<std::mutex> lock(
+                    g_transferSummaryMutex);
+
+                auto it = std::find_if(
+                    g_transferSummaries.begin(),
+                    g_transferSummaries.end(),
+                    [&state](TransferSummaryState const &candidate)
+                    {
+                        return candidate.tile == state.tile &&
+                               candidate.operationTileRoot ==
+                                   state.operationTileRoot;
+                    });
+
+                if (it != g_transferSummaries.end())
+                {
+                    stateStillLive = true;
+
+                    for (DirectUI::Element *element : newlyHidden)
+                    {
+                        if (std::find(
+                                it->nativeElementsHiddenByMod.begin(),
+                                it->nativeElementsHiddenByMod.end(),
+                                element) ==
+                            it->nativeElementsHiddenByMod.end())
+                        {
+                            it->nativeElementsHiddenByMod.push_back(
+                                element);
+                        }
+                    }
+                }
+            }
+
+            if (!stateStillLive)
+            {
+                // Registration disappeared while applying suppression.
+                // Undo only the changes made by this invocation.
+                for (DirectUI::Element *element : newlyHidden)
+                {
+                    Element_SetVisible_Original(element, true);
+                }
+            }
+
             return;
         }
 
-        // Restore Explorer's own normal-mode visibility model before revealing
-        // it for a special state or removing the mod.
-        bool expanded = state.displayModeKnown && state.expanded;
-        setVisible(state.tileHeaderRoot, true);
-        setVisible(find(L"eltSummary"), true);
-        setVisible(find(L"eltDetails"), expanded);
-        setVisible(find(L"eltChartArea"), expanded);
-        setVisible(find(L"eltRateChart_New"), expanded);
-        setVisible(find(L"eltProgressBarContainer"), !expanded);
-        setVisible(find(L"eltProgressBar"), !expanded);
-    }
+        std::vector<DirectUI::Element *> ownedElements;
+        {
+            std::lock_guard<std::mutex> lock(
+                g_transferSummaryMutex);
 
+            auto it = std::find_if(
+                g_transferSummaries.begin(),
+                g_transferSummaries.end(),
+                [&state](TransferSummaryState const &candidate)
+                {
+                    return candidate.tile == state.tile &&
+                           candidate.operationTileRoot ==
+                               state.operationTileRoot;
+                });
+
+            if (it == g_transferSummaries.end())
+            {
+                return;
+            }
+
+            ownedElements.swap(it->nativeElementsHiddenByMod);
+        }
+
+        std::vector<DirectUI::Element *> failedRestores;
+
+        for (DirectUI::Element *element : ownedElements)
+        {
+            if (!element ||
+                std::find(elements.begin(), elements.end(), element) ==
+                    elements.end())
+            {
+                // The old descendant is no longer part of this live
+                // tile. Do not dereference or alter a replacement.
+                continue;
+            }
+
+            if (Element_GetVisible_Original(element))
+            {
+                continue;
+            }
+
+            HRESULT result =
+                Element_SetVisible_Original(element, true);
+
+            if (FAILED(result))
+            {
+                failedRestores.push_back(element);
+            }
+        }
+
+        if (!failedRestores.empty())
+        {
+            std::lock_guard<std::mutex> lock(
+                g_transferSummaryMutex);
+
+            auto it = std::find_if(
+                g_transferSummaries.begin(),
+                g_transferSummaries.end(),
+                [&state](TransferSummaryState const &candidate)
+                {
+                    return candidate.tile == state.tile &&
+                           candidate.operationTileRoot ==
+                               state.operationTileRoot;
+                });
+
+            if (it != g_transferSummaries.end())
+            {
+                for (DirectUI::Element *element : failedRestores)
+                {
+                    if (std::find(
+                            it->nativeElementsHiddenByMod.begin(),
+                            it->nativeElementsHiddenByMod.end(),
+                            element) ==
+                        it->nativeElementsHiddenByMod.end())
+                    {
+                        it->nativeElementsHiddenByMod.push_back(
+                            element);
+                    }
+                }
+            }
+        }
+    }
     void RestoreNativePresentationForHost(HWND hostWindow)
     {
         std::vector<TransferSummaryState> states;
@@ -11476,6 +11661,21 @@ namespace
         bool ownerResolved = ResolveDisplayModeOwner(
             thisPtr, transitionId, &canonicalOwner, false);
 
+        TransferSummaryState preNativeState{};
+        bool releasedNativeVisibilityForModeChange =
+            ownerResolved && canonicalOwner &&
+            CopyRegisteredTransferState(
+                canonicalOwner, &preNativeState);
+
+        if (releasedNativeVisibilityForModeChange)
+        {
+            // Give Explorer back exactly the elements we suppressed
+            // before asking it to establish the new compact/expanded
+            // visibility state.
+            SetNativeDuplicatePresentation(
+                preNativeState, false);
+        }
+
         HRESULT result = COperationStatusTile_SetTileDisplayMode_Original(
             thisPtr, expanded);
 
@@ -11491,6 +11691,27 @@ namespace
             RecordDisplayMode(canonicalOwner, expanded, transitionId);
             ScheduleDeferredDisplaySnapshot(canonicalOwner, transitionId,
                                             expanded);
+        }
+        else if (ownerStillResolved &&
+                 releasedNativeVisibilityForModeChange)
+        {
+            TransferSummaryState currentState{};
+            if (CopyRegisteredTransferState(
+                    canonicalOwner, &currentState) &&
+                currentState.tile)
+            {
+                HWND hostWindow = nullptr;
+                if (GetUniqueRegisteredCircleHost(
+                        currentState.tile, &hostWindow) &&
+                    hostWindow &&
+                    !IsHostInSpecialOperationState(hostWindow) &&
+                    IsSingleNormalProgressTileForHost(
+                        currentState.tile, hostWindow))
+                {
+                    SetNativeDuplicatePresentation(
+                        currentState, true);
+                }
+            }
         }
         else if (!ownerStillResolved)
         {
