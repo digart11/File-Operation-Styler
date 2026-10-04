@@ -50,6 +50,8 @@ Choose one of the included themes or adjust a few basic options to create your o
 File Operation Styler changes the appearance of the normal file operation window only.
 Windows continues to handle the actual copy, move, delete, conflicts, and errors.
 
+This version is tested on Windows 11 24H2 x64. File Operation Styler relies on private Explorer and Shell presentation interfaces, so other Windows builds may use different symbols or layouts. Unsupported presentations are designed to fall back to the native Windows file-operation UI.
+
 Settings changes apply to new file-operation windows; operations already in progress may use the native Windows presentation until they complete.
 
 */
