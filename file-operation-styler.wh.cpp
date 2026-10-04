@@ -7097,27 +7097,45 @@ namespace
         }
     }
 
+    constexpr wchar_t kGlassDirectUiHiddenByModProperty[] =
+        L"Windhawk.FileOperationStyler.GlassDirectUiHidden";
+
     void RestoreGlassDirectUiForHost(HWND hostWindow)
     {
-        if (!IsGlassTheme() || !hostWindow || !IsWindow(hostWindow))
+        if (!hostWindow || !IsWindow(hostWindow))
         {
             return;
         }
 
         HWND directUi = nullptr;
-
         while ((directUi = FindWindowExW(
                     hostWindow,
                     directUi,
                     L"DirectUIHWND",
                     nullptr)) != nullptr)
         {
+            if (!GetPropW(
+                    directUi,
+                    kGlassDirectUiHiddenByModProperty))
+            {
+                continue;
+            }
+
             if (!IsWindowVisible(directUi))
             {
+                ShowWindow(directUi, SW_SHOWNA);
+            }
 
-                ShowWindow(
+            if (IsWindowVisible(directUi))
+            {
+                RemovePropW(
                     directUi,
-                    SW_SHOWNA);
+                    kGlassDirectUiHiddenByModProperty);
+
+                InvalidateRect(
+                    directUi,
+                    nullptr,
+                    TRUE);
             }
         }
     }
@@ -7725,7 +7743,6 @@ namespace
             // The custom paint surface is ready. Only now hide Explorer's
             // native DirectUI presentation so a paint failure can always
             // fall back to usable native content.
-            std::vector<HWND> hiddenDirectUiWindows;
             HWND directUi = nullptr;
             while ((directUi = FindWindowExW(
                         window,
@@ -7733,13 +7750,29 @@ namespace
                         L"DirectUIHWND",
                         nullptr)) != nullptr)
             {
+                if (!IsWindowVisible(directUi))
+                {
+                    continue;
+                }
+
+                if (!SetPropW(
+                        directUi,
+                        kGlassDirectUiHiddenByModProperty,
+                        reinterpret_cast<HANDLE>(1)))
+                {
+                    // Fail closed: without an ownership marker we
+                    // cannot safely restore this HWND later.
+                    continue;
+                }
+
+                ShowWindow(directUi, SW_HIDE);
+
                 if (IsWindowVisible(directUi))
                 {
-                    ShowWindow(directUi, SW_HIDE);
-                    if (!IsWindowVisible(directUi))
-                    {
-                        hiddenDirectUiWindows.push_back(directUi);
-                    }
+                    // Hiding failed, so this HWND never became ours.
+                    RemovePropW(
+                        directUi,
+                        kGlassDirectUiHiddenByModProperty);
                 }
             }
 
@@ -7883,39 +7916,9 @@ namespace
                         static_cast<unsigned int>(commitResult),
                         reinterpret_cast<void *>(window));
 
-                    for (HWND hiddenDirectUi : hiddenDirectUiWindows)
-                    {
-                        if (!hiddenDirectUi ||
-                            !IsWindow(hiddenDirectUi) ||
-                            GetParent(hiddenDirectUi) != window)
-                        {
-                            continue;
-                        }
-
-                        wchar_t className[32]{};
-                        if (!GetClassNameW(
-                                hiddenDirectUi,
-                                className,
-                                ARRAYSIZE(className)) ||
-                            lstrcmpW(
-                                className,
-                                L"DirectUIHWND") != 0)
-                        {
-                            continue;
-                        }
-
-                        if (!IsWindowVisible(hiddenDirectUi))
-                        {
-                            ShowWindow(
-                                hiddenDirectUi,
-                                SW_SHOWNA);
-                        }
-
-                        InvalidateRect(
-                            hiddenDirectUi,
-                            nullptr,
-                            TRUE);
-                    }
+                    // The custom frame did not commit. Restore only
+                    // DirectUI HWNDs that carry our ownership marker.
+                    RestoreGlassDirectUiForHost(window);
 
                     bp->uninit();
                     EndPaint(window, &paint);
