@@ -22,6 +22,12 @@ File Operation Styler gives copy, move, delete, and recycle operations a cleaner
 
 ![File Operation Styler](https://raw.githubusercontent.com/digart11/File-Operation-Styler/master/images/file-operation-styler.png)
 
+### Interactive Controls
+
+![File Operation Styler interactive controls](https://raw.githubusercontent.com/digart11/File-Operation-Styler/master/images/file-operation-styler-controls.png)
+
+The large progress circle can pause and resume operations, while optional settings can hide the smaller controls and title-bar percentage for a cleaner layout.
+
 ### Default vs File Operation Styler
 
 ![Default vs File Operation Styler](https://raw.githubusercontent.com/digart11/File-Operation-Styler/master/images/file-operation-styler-compare.png)
