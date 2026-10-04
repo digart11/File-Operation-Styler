@@ -1,6 +1,6 @@
 // ==WindhawkMod==
-// @id              file-operation-styler2
-// @name            File Operation Styler2
+// @id              file-operation-styler
+// @name            File Operation Styler
 // @description     Portable custom presentation for native Explorer file operations with a skin-safe unified presentation.
 // @version         1.2.0
 // @author          digART
