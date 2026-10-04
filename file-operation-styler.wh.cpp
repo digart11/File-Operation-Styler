@@ -34,10 +34,19 @@ File Operation Styler gives copy, move, delete, and recycle operations a cleaner
 - Added a Frosted Glass theme with Windows Acrylic and Custom Blur styles.
 - Added current-file progress while the circular indicator continues to show overall operation progress.
 - Added interactive Pause / Resume behavior to the large progress circle.
-- Added options to hide the small action controls and title-bar progress text.
+- Added an option to hide the small Pause / Resume and Cancel buttons in the upper-right corner. The large progress-circle control and bottom Cancel button remain available.
+- Added an option to hide the percentage from the file-operation window title***
 - Improved multiple-operation support, including synchronized More / Fewer Details behavior.
 - Improved fallback to the native Windows UI for conflicts, errors, and unsupported presentation states.
 - Improved restoration and teardown when the mod is disabled, reloaded, or settings are changed.
+
+### About hiding the title percentage
+
+The **Hide title-bar percentage** option removes the normal progress percentage from the file-operation window title.
+
+Windows also reuses this window-title text in places such as taskbar previews, Alt+Tab, and other shell UI. Because of this, enabling the option can also remove the percentage from those locations.
+
+There is currently no reliable way for File Operation Styler to hide only the percentage in the window title without also affecting those Windows surfaces.
 
 ## Features
 
