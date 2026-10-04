@@ -4446,15 +4446,19 @@ namespace
             1.0f);
         for (int row = 1; row < 4; ++row)
         {
-            Gdiplus::REAL y = static_cast<Gdiplus::REAL>(
-                chartTop + (chartHeight * row) / 4);
+            int yPixels =
+                chartTop + (chartHeight * row) / 4;
+            Gdiplus::REAL y =
+                static_cast<Gdiplus::REAL>(yPixels);
             graphics.DrawLine(&gridPen, 0.0f, y,
                               static_cast<Gdiplus::REAL>(chartWidth), y);
         }
         for (int column = 1; column < 6; ++column)
         {
-            Gdiplus::REAL x = static_cast<Gdiplus::REAL>(
-                (chartWidth * column) / 6);
+            int xPixels =
+                (chartWidth * column) / 6;
+            Gdiplus::REAL x =
+                static_cast<Gdiplus::REAL>(xPixels);
             graphics.DrawLine(&gridPen, x,
                               static_cast<Gdiplus::REAL>(chartTop), x,
                               static_cast<Gdiplus::REAL>(
@@ -11861,123 +11865,6 @@ namespace
         RemoveTransferSummary(thisPtr);
         DestroyProgressCircle(thisPtr);
         OperationTileElement_Destructor_Original(thisPtr);
-    }
-
-    struct WindowResizeResult
-    {
-        int beforeWidth;
-        int beforeHeight;
-        int afterWidth;
-        int afterHeight;
-        bool hostResized;
-        bool success;
-    };
-
-    WindowResizeResult EnsureOperationStatusWindowWidth(
-        unsigned long long eventId)
-    {
-        WindowResizeResult resizeResult{};
-        WindowLookupContext context{eventId, nullptr};
-        SetLastError(ERROR_SUCCESS);
-        BOOL enumResult = EnumThreadWindows(
-            GetCurrentThreadId(), FindOperationStatusWindow,
-            reinterpret_cast<LPARAM>(&context));
-        if (!context.operationStatusWindow)
-        {
-            DWORD error = enumResult ? ERROR_NOT_FOUND : GetLastError();
-            if (error == ERROR_SUCCESS)
-            {
-                error = ERROR_NOT_FOUND;
-            }
-            Wh_Log(L"eventId=%llu base-layout OperationStatusWindow lookup "
-                   L"failed error=%lu",
-                   eventId, error);
-            return resizeResult;
-        }
-
-        RECT windowRect;
-        if (!GetWindowRect(context.operationStatusWindow, &windowRect))
-        {
-            Wh_Log(L"eventId=%llu base-layout GetWindowRect before failed "
-                   L"error=%lu",
-                   eventId, GetLastError());
-            return resizeResult;
-        }
-
-        resizeResult.beforeWidth = windowRect.right - windowRect.left;
-        resizeResult.beforeHeight = windowRect.bottom - windowRect.top;
-        resizeResult.afterWidth = resizeResult.beforeWidth;
-        resizeResult.afterHeight = resizeResult.beforeHeight;
-
-        RECT clientRect;
-        if (!GetClientRect(context.operationStatusWindow, &clientRect))
-        {
-            Wh_Log(L"eventId=%llu base-layout GetClientRect before failed "
-                   L"error=%lu",
-                   eventId, GetLastError());
-            return resizeResult;
-        }
-
-        UINT dpi = GetDpiForWindow(context.operationStatusWindow);
-        if (!dpi)
-        {
-            Wh_Log(L"eventId=%llu base-layout GetDpiForWindow failed dpi=0",
-                   eventId);
-            return resizeResult;
-        }
-
-        int targetClientWidth =
-            MulDiv(kRequestedTileWidth, static_cast<int>(dpi),
-                   USER_DEFAULT_SCREEN_DPI);
-        int currentClientWidth = clientRect.right - clientRect.left;
-        if (currentClientWidth >= targetClientWidth)
-        {
-            resizeResult.success = true;
-            return resizeResult;
-        }
-
-        int nonClientWidth = resizeResult.beforeWidth - currentClientWidth;
-        int targetWindowWidth = targetClientWidth + nonClientWidth;
-        BOOL resized = FALSE;
-        {
-            ScopedHostGeometryChange geometryChange(
-                context.operationStatusWindow, false);
-            resized = SetWindowPos(
-                context.operationStatusWindow, nullptr, 0, 0,
-                targetWindowWidth, resizeResult.beforeHeight,
-                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-        if (!resized)
-        {
-            Wh_Log(L"eventId=%llu base-layout SetWindowPos failed "
-                   L"requestedWidth=%d error=%lu",
-                   eventId, targetWindowWidth, GetLastError());
-            return resizeResult;
-        }
-
-        resizeResult.hostResized = true;
-        if (!GetWindowRect(context.operationStatusWindow, &windowRect))
-        {
-            Wh_Log(L"eventId=%llu base-layout GetWindowRect after failed "
-                   L"error=%lu",
-                   eventId, GetLastError());
-            return resizeResult;
-        }
-
-        resizeResult.afterWidth = windowRect.right - windowRect.left;
-        resizeResult.afterHeight = windowRect.bottom - windowRect.top;
-        if (!GetClientRect(context.operationStatusWindow, &clientRect))
-        {
-            Wh_Log(L"eventId=%llu base-layout GetClientRect after failed "
-                   L"error=%lu",
-                   eventId, GetLastError());
-            return resizeResult;
-        }
-
-        resizeResult.success =
-            clientRect.right - clientRect.left >= targetClientWidth &&
-            resizeResult.afterHeight == resizeResult.beforeHeight;
-        return resizeResult;
     }
 
     // Exact verified x64 ABI encoded by the Microsoft public symbol:
