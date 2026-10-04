@@ -964,7 +964,7 @@ namespace
         std::wstring circleFont = L"Segoe UI Variable Display";
         std::wstring circleLabelFont = L"Segoe UI Variable";
         std::wstring nativeFont = L"Segoe UI Variable";
-        int circlePercentSize = 25;
+        int circlePercentSize = 26;
         int circleLabelSize = 11;
         int bodySize = 11;
         int graphValueSize = 10;
@@ -1835,11 +1835,6 @@ namespace
         HRESULT(WINAPI *)(
             HWND hwnd,
             GlassFrameMargins const *margins);
-
-    using DwmEnableBlurBehindWindow_t =
-        HRESULT(WINAPI *)(
-            HWND hwnd,
-            const DWM_BLURBEHIND *blurBehind);
 
     void SetGlassDwmBlurRegion(
         HWND hostWindow,
@@ -7356,18 +7351,11 @@ namespace
                 HPAINTBUFFER,
                 BOOL);
 
-        using SetAlpha_t =
-            HRESULT(WINAPI *)(
-                HPAINTBUFFER,
-                RECT const *,
-                BYTE);
-
         HMODULE module = nullptr;
         Init_t init = nullptr;
         UnInit_t uninit = nullptr;
         Begin_t begin = nullptr;
         End_t end = nullptr;
-        SetAlpha_t setAlpha = nullptr;
     };
 
     GlassBufferedPaintApi g_glassBufferedPaintApi{};
@@ -7392,7 +7380,10 @@ namespace
             if (!api.module)
             {
                 api.module =
-                    LoadLibraryW(L"uxtheme.dll");
+                    LoadLibraryExW(
+                        L"uxtheme.dll",
+                        nullptr,
+                        LOAD_LIBRARY_SEARCH_SYSTEM32);
 
                 if (api.module)
                 {
@@ -7426,19 +7417,13 @@ namespace
                             api.module,
                             "EndBufferedPaint"));
 
-                api.setAlpha =
-                    reinterpret_cast<GlassBufferedPaintApi::SetAlpha_t>(
-                        GetProcAddress(
-                            api.module,
-                            "BufferedPaintSetAlpha"));
             }
         }
 
         if (!api.init ||
             !api.uninit ||
             !api.begin ||
-            !api.end ||
-            !api.setAlpha)
+            !api.end)
         {
             return nullptr;
         }
@@ -8005,6 +7990,8 @@ namespace
 
             BP_PAINTPARAMS params{};
             params.cbSize = sizeof(params);
+            // Custom Blur depends on a transparent host surface. This clears
+            // the top-down DIB to ARGB {0, 0, 0, 0} before any drawing.
             params.dwFlags = BPPF_ERASE;
 
             HDC bufferDc = nullptr;
@@ -8030,23 +8017,6 @@ namespace
                 EndPaint(window, &paint);
                 RestoreGlassDirectUiForHost(window);
                 return 0;
-            }
-
-            // Custom Blur needs a transparent host paint surface so the
-            // DWM blur behind the client remains visible. Acrylic keeps
-            // the existing Windows SystemBackdrop composition path.
-            if (g_settings.glassEffect == L"blur")
-            {
-                HRESULT alphaResult =
-                    bp->setAlpha(buffer, &client, 0);
-                if (FAILED(alphaResult))
-                {
-                    Wh_Log(
-                        L"Glass: BufferedPaintSetAlpha failed "
-                        L"result=0x%08X hwnd=%p",
-                        static_cast<unsigned int>(alphaResult),
-                        reinterpret_cast<void *>(window));
-                }
             }
 
             // The custom paint surface is ready. Only now hide Explorer's
@@ -10530,7 +10500,8 @@ namespace
                 return;
             }
 
-            if (EnsureSharedProgressBridge())
+            if (g_showCurrentFileProgressBar &&
+                EnsureSharedProgressBridge())
             {
                 ULONGLONG readNow = GetTickCount64();
                 bool foundSharedCurrentFile = false;
@@ -11637,7 +11608,9 @@ namespace
         COperationDataProvider *thisPtr,
         IShellItem *currentItem)
     {
-        if (currentItem)
+        bool trackCurrentFile = g_showCurrentFileProgressBar;
+
+        if (trackCurrentFile && currentItem)
         {
             currentItem->AddRef();
         }
@@ -11646,7 +11619,8 @@ namespace
             COperationDataProvider_WriteCurrentItem_Original(
                 thisPtr, currentItem);
 
-        if (!g_unloading.load(std::memory_order_acquire))
+        if (trackCurrentFile &&
+            !g_unloading.load(std::memory_order_acquire))
         {
             PWSTR filePath = nullptr;
 
@@ -11722,7 +11696,7 @@ namespace
             }
         }
 
-        if (currentItem)
+        if (trackCurrentFile && currentItem)
         {
             currentItem->Release();
         }
@@ -11739,7 +11713,7 @@ namespace
         unsigned long long value4,
         unsigned long long value5)
     {
-
+        if (g_showCurrentFileProgressBar)
         {
             std::lock_guard<std::mutex> lock(g_transferSummaryMutex);
 
@@ -12386,7 +12360,8 @@ namespace
 BOOL Wh_ModInit()
 {
     g_unloading.store(false, std::memory_order_release);
-    Wh_Log(L"File Operation Styler 1.2.0 initialization started");
+    Wh_Log(L"File Operation Styler " WH_MOD_VERSION
+           L" initialization started");
 
     LoadSettings();
 
@@ -12403,7 +12378,8 @@ BOOL Wh_ModInit()
         return FALSE;
     }
 
-    Wh_Log(L"File Operation Styler 1.2.0 initialization complete");
+    Wh_Log(L"File Operation Styler " WH_MOD_VERSION
+           L" initialization complete");
     return TRUE;
 }
 
@@ -12414,7 +12390,8 @@ void Wh_ModBeforeUninit()
         return;
     }
 
-    Wh_Log(L"File Operation Styler 1.2.0 presentation teardown started");
+    Wh_Log(L"File Operation Styler " WH_MOD_VERSION
+           L" presentation teardown started");
     {
         std::unique_lock<std::mutex> lock(g_presentationActivationMutex);
         g_presentationActivationCondition.wait(
@@ -12422,7 +12399,8 @@ void Wh_ModBeforeUninit()
             { return g_presentationActivations == 0; });
     }
     DestroyAllProgressCircles();
-    Wh_Log(L"File Operation Styler 1.2.0 presentation teardown complete");
+    Wh_Log(L"File Operation Styler " WH_MOD_VERSION
+           L" presentation teardown complete");
 }
 
 void Wh_ModUninit()
@@ -12439,7 +12417,8 @@ void Wh_ModUninit()
     ShutdownGlassBufferedPaintApi();
     ShutdownDwmApi();
     ShutdownShellMemoryApi();
-    Wh_Log(L"File Operation Styler 1.2.0 uninitialization complete");
+    Wh_Log(L"File Operation Styler " WH_MOD_VERSION
+           L" uninitialization complete");
 }
 
 BOOL Wh_ModSettingsChanged(BOOL *bReload)
