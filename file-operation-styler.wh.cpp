@@ -8544,6 +8544,37 @@ namespace
             return false;
         }
 
+        // Capture Explorer's current native size before any mod-owned
+        // resize can occur. Later genuine native size changes may
+        // update this snapshot through WM_WINDOWPOSCHANGING.
+        RECT initialNativeWindowRect{};
+        if (GetWindowRect(hostWindow, &initialNativeWindowRect))
+        {
+            WINDOWPOS initialNativePosition{};
+            initialNativePosition.cx =
+                initialNativeWindowRect.right -
+                initialNativeWindowRect.left;
+            initialNativePosition.cy =
+                initialNativeWindowRect.bottom -
+                initialNativeWindowRect.top;
+
+            if (initialNativePosition.cx > 0 &&
+                initialNativePosition.cy > 0)
+            {
+                CaptureHostNativeGeometry(
+                    hostWindow, initialNativePosition);
+            }
+        }
+        else
+        {
+            Wh_Log(
+                L"eventId=%llu initial native geometry capture failed "
+                L"host=%p error=%lu",
+                eventId,
+                reinterpret_cast<void *>(hostWindow),
+                GetLastError());
+        }
+
         bool shuttingDown = false;
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
