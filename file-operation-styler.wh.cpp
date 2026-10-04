@@ -2184,7 +2184,7 @@ namespace
     constexpr UINT kCurrentFileAnimationMessage = WM_APP + 0x51;
     constexpr UINT_PTR kCurrentFileAnimationTimer = 0xF0510020;
     constexpr UINT_PTR kCircleHoverAnimationTimer = 0xF0510021;
-    constexpr ULONGLONG kPausedPulseDurationMs = 3000;
+    constexpr UINT kCircleInteractionAnimationIntervalMs = 16;
 
     struct CurrentFileAnimation
     {
@@ -2222,7 +2222,6 @@ namespace
         bool positionValid;
         CurrentFileAnimation currentFileAnimation{};
         bool circleHovered = false;
-        ULONGLONG pausedPulseUntil = 0;
     };
 
     struct HostPositionRequest
@@ -2911,7 +2910,6 @@ namespace
         bool deleteLike = false;
         bool paused = false;
         bool circleHovered = false;
-        bool pausedPulseActive = false;
         std::wstring description;
         std::wstring descriptionStart;
         std::wstring firstLocation;
@@ -2946,10 +2944,6 @@ namespace
             storedPaused = it->paused;
             storedPausedKnown = it->pausedStateKnown;
             snapshot->circleHovered = it->circleHovered;
-            snapshot->pausedPulseActive =
-                storedPausedKnown &&
-                storedPaused &&
-                it->pausedPulseUntil > GetTickCount64();
             animation = it->currentFileAnimation;
 
             snapshot->displayedOverallPercent =
@@ -3229,6 +3223,7 @@ namespace
 
         OperationTileElement *tile = nullptr;
         bool changed = false;
+        bool paused = false;
 
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -3247,6 +3242,9 @@ namespace
             }
 
             tile = it->tile;
+            paused =
+                it->pausedStateKnown &&
+                it->paused;
 
             if (it->circleHovered != hovered)
             {
@@ -3257,37 +3255,15 @@ namespace
 
         if (changed)
         {
-            bool pausedPulseActive = false;
-
-            {
-                std::lock_guard<std::mutex> lock(g_circleMutex);
-
-                auto it = std::find_if(
-                    g_circles.begin(),
-                    g_circles.end(),
-                    [infoWindow](CircleState const &state)
-                    {
-                        return state.infoWindow == infoWindow;
-                    });
-
-                if (it != g_circles.end())
-                {
-                    pausedPulseActive =
-                        it->pausedStateKnown &&
-                        it->paused &&
-                        it->pausedPulseUntil > GetTickCount64();
-                }
-            }
-
             if (hovered)
             {
                 SetTimer(
                     infoWindow,
                     kCircleHoverAnimationTimer,
-                    32,
+                    kCircleInteractionAnimationIntervalMs,
                     nullptr);
             }
-            else if (!pausedPulseActive)
+            else if (!paused)
             {
                 KillTimer(
                     infoWindow,
@@ -3300,7 +3276,6 @@ namespace
             }
         }
     }
-
     void ClearCircleHoverStatesForHost(HWND hostWindow)
     {
         if (!hostWindow)
@@ -3333,8 +3308,7 @@ namespace
                                     ThemePalette const &theme,
                                     TypographyConfig const &type,
                                     bool paused = false,
-                                    bool hovered = false,
-                                    bool pausedPulseActive = false)
+                                    bool hovered = false)
     {
         if (!ActiveElements().showCircle)
         {
@@ -3446,26 +3420,17 @@ namespace
         constexpr double kInteractionPi =
             3.14159265358979323846;
 
-        bool animateInteraction =
-            hovered ||
-            (paused && pausedPulseActive);
+        double interactionPhase =
+            static_cast<double>(
+                GetTickCount64() % 800) /
+            800.0;
 
-        double interactionWave = 0.5;
-
-        if (animateInteraction)
-        {
-            double interactionPhase =
-                static_cast<double>(
-                    GetTickCount64() % 800) /
-                800.0;
-
-            interactionWave =
-                0.5 -
-                0.5 * std::cos(
-                          interactionPhase *
-                          2.0 *
-                          kInteractionPi);
-        }
+        double interactionWave =
+            0.5 -
+            0.5 * std::cos(
+                      interactionPhase *
+                      2.0 *
+                      kInteractionPi);
 
         Gdiplus::REAL centerX =
             ringLeft + diameter / 2.0f;
@@ -3950,8 +3915,7 @@ namespace
             theme,
             type,
             snapshot.paused,
-            snapshot.circleHovered,
-            snapshot.pausedPulseActive);
+            snapshot.circleHovered);
 
         int effectiveBodySize =
             type.bodySize +
@@ -5040,6 +5004,7 @@ namespace
         bool paused)
     {
         HWND infoWindow = nullptr;
+        bool hovered = false;
 
         {
             std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -5054,11 +5019,8 @@ namespace
 
             it->paused = paused;
             it->pausedStateKnown = true;
-            it->pausedPulseUntil =
-                paused
-                    ? GetTickCount64() + kPausedPulseDurationMs
-                    : 0;
             infoWindow = it->infoWindow;
+            hovered = it->circleHovered;
         }
 
         if (infoWindow && IsWindow(infoWindow))
@@ -5067,16 +5029,25 @@ namespace
             {
                 StopCurrentFileAnimation(infoWindow);
 
-                // Briefly preserve the breathing feedback after Pause,
-                // then let the paused presentation become static.
+                // Paused is an intentionally animated state. Keep the
+                // breathing effect active until the operation resumes.
                 SetTimer(
                     infoWindow,
                     kCircleHoverAnimationTimer,
-                    32,
+                    kCircleInteractionAnimationIntervalMs,
                     nullptr);
             }
             else
             {
+                // Hover still owns the animation timer while the pointer
+                // remains over the interactive circle.
+                if (!hovered)
+                {
+                    KillTimer(
+                        infoWindow,
+                        kCircleHoverAnimationTimer);
+                }
+
                 PostMessageW(
                     infoWindow,
                     kCurrentFileAnimationMessage,
@@ -5500,7 +5471,7 @@ namespace
             {
                 OperationTileElement *tile = nullptr;
                 bool hovered = false;
-                bool pausedPulseActive = false;
+                bool paused = false;
 
                 {
                     std::lock_guard<std::mutex> lock(g_circleMutex);
@@ -5517,29 +5488,17 @@ namespace
                     {
                         tile = it->tile;
                         hovered = it->circleHovered;
-
-                        pausedPulseActive =
+                        paused =
                             it->pausedStateKnown &&
-                            it->paused &&
-                            it->pausedPulseUntil > GetTickCount64();
-
-                        if (!pausedPulseActive)
-                        {
-                            it->pausedPulseUntil = 0;
-                        }
+                            it->paused;
                     }
                 }
 
-                if (!hovered && !pausedPulseActive)
+                if (!hovered && !paused)
                 {
-                    KillTimer(window, kCircleHoverAnimationTimer);
-
-                    if (tile)
-                    {
-                        // Final frame settles the paused presentation.
-                        InvalidateInfoPanelForTile(tile, false);
-                    }
-
+                    KillTimer(
+                        window,
+                        kCircleHoverAnimationTimer);
                     return 0;
                 }
 
@@ -7102,7 +7061,6 @@ namespace
 
                 state.positionValid = false;
                 state.circleHovered = false;
-                state.pausedPulseUntil = 0;
                 if (state.circleWindow)
                 {
                     windows.push_back(state.circleWindow);
