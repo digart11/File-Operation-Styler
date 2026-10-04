@@ -232,6 +232,8 @@ namespace DirectUI
 
 namespace
 {
+    HMODULE g_ownedOle32Module = nullptr;
+
     void FreeShellMemory(void *memory)
     {
         if (!memory)
@@ -243,7 +245,17 @@ namespace
         {
             HMODULE ole32 = GetModuleHandleW(L"ole32.dll");
             if (!ole32)
-                ole32 = LoadLibraryW(L"ole32.dll");
+            {
+                ole32 = LoadLibraryExW(
+                    L"ole32.dll",
+                    nullptr,
+                    LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+                if (ole32)
+                {
+                    g_ownedOle32Module = ole32;
+                }
+            }
 
             return ole32
                        ? reinterpret_cast<CoTaskMemFree_t>(
@@ -253,6 +265,15 @@ namespace
 
         if (freeFn)
             freeFn(memory);
+    }
+
+    void ShutdownShellMemoryApi()
+    {
+        if (g_ownedOle32Module)
+        {
+            FreeLibrary(g_ownedOle32Module);
+            g_ownedOle32Module = nullptr;
+        }
     }
 
     static_assert(sizeof(void *) == 8);
@@ -1574,7 +1595,6 @@ namespace
 
     constexpr int kWcaAccentPolicy = 19;
     constexpr int kAccentStateDisabled = 0;
-    constexpr int kAccentEnableAcrylicBlurBehind = 4;
 
     constexpr wchar_t kGlassEffectAppliedProperty[] =
         L"Windhawk.FileOperationStyler.GlassEffectApplied";
@@ -1637,6 +1657,12 @@ namespace
             g_dwmSetWindowAttribute =
                 reinterpret_cast<DwmSetWindowAttribute_t>(
                 GetProcAddress(module, "DwmSetWindowAttribute"));
+
+            g_dwmEnableBlurBehindWindow =
+                reinterpret_cast<DwmEnableBlurBehindWindow_t>(
+                    GetProcAddress(
+                        module,
+                        "DwmEnableBlurBehindWindow"));
             if (owned)
             {
                 g_ownedDwmApiModule = module;
@@ -1800,22 +1826,8 @@ namespace
             return;
         }
 
-        HMODULE dwmapi = GetModuleHandleW(L"dwmapi.dll");
-        if (!dwmapi)
-        {
-            dwmapi = LoadLibraryW(L"dwmapi.dll");
-        }
-
-        if (!dwmapi)
-        {
-            return;
-        }
-
         auto enableBlurBehind =
-            reinterpret_cast<DwmEnableBlurBehindWindow_t>(
-                GetProcAddress(
-                    dwmapi,
-                    "DwmEnableBlurBehindWindow"));
+            GetDwmEnableBlurBehindWindow();
 
         if (!enableBlurBehind)
         {
@@ -12491,6 +12503,7 @@ void Wh_ModUninit()
     ShutdownSharedProgressBridge();
     ShutdownGlassBufferedPaintApi();
     ShutdownDwmApi();
+    ShutdownShellMemoryApi();
     Wh_Log(L"File Operation Styler 1.2.0 uninitialization complete");
 }
 
