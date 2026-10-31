@@ -22,16 +22,14 @@ The large progress circle can pause and resume operations, while optional settin
 
 ![File Operation Styler Themes](images/file-operation-styler-themes-1.2.png)
 
-## What's new in 1.2.0
+## What's new in 1.3.0
 
-- Added a Frosted Glass theme with Windows Acrylic and Custom Blur styles.
-- Added current-file progress while the circular indicator continues to show overall operation progress.
-- Added interactive Pause / Resume behavior to the large progress circle.
-- Added an option to hide the small Pause / Resume and Cancel buttons in the upper-right corner. The large progress-circle control and bottom Cancel button remain available.
-- Added an option to hide the percentage from the file-operation window title.
-- Improved multiple-operation support, including synchronized More / Fewer Details behavior.
-- Improved fallback to the native Windows UI for conflicts, errors, and unsupported presentation states.
-- Improved restoration and teardown when the mod is disabled, reloaded, or settings are changed.
+- Fixed compatibility with newer Windows 11 26H2 builds.
+- Added vertical scrolling for multiple simultaneous file operations.
+- Added mouse-wheel and scrollbar navigation.
+- Improved Glass text rendering and window resizing.
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 
 ## Features
 
@@ -40,7 +38,7 @@ The large progress circle can pause and resume operations, while optional settin
 - Current-file progress bar
 - Transferred size, remaining items, speed, and estimated time
 - Progress graph in More Details view
-- Multiple file operations in the same window
+- Multiple file operations in one window, with automatic vertical scrolling when needed
 - Pause, resume, and cancel controls
 - Interactive Pause / Resume control in the large progress circle
 - Option to hide the small Pause / Resume and Cancel buttons
@@ -62,4 +60,4 @@ File Operation Styler changes the appearance of the normal Windows file operatio
 
 Settings changes apply to new file-operation windows; operations already in progress may use the native Windows presentation until they complete.
 
-File Operation Styler has been tested on Windows 11 24H2 x64. It relies on private Explorer and Shell presentation interfaces, so other Windows builds can use different symbols or layouts. Unsupported presentations are designed to fall back to the native Windows UI.
+File Operation Styler has been tested on Windows 11 25H2 and 26H2 x64, including build 26300.9818. It relies on private Explorer and Shell presentation interfaces, so compatibility may vary between Windows builds. Unsupported presentations fall back to the native Windows UI.

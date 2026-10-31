@@ -1,5 +1,25 @@
 # File Operation Styler changelog
 
+## 1.3.0
+
+- Fixed initialization on newer Windows 11 26H2 builds where the native _CalculateRate symbol is unavailable, using the existing measured transfer-rate fallback.
+- Fixed multiple simultaneous file operations extending beyond the screen by limiting the window to the monitor work area and adding vertical scrolling.
+- Added scrollbar and mouse-wheel navigation while keeping individual transfer controls and the shared footer accessible.
+- Improved layout positioning and cleanup as grouped operations are added, removed, or completed.
+- Improved Glass text antialiasing for smoother rendering.
+- Improved handling of Explorer's native window-size rewrites during custom layout changes.
+
+## 1.2.0
+
+- Added a Frosted Glass theme with Windows Acrylic and Custom Blur styles.
+- Added current-file progress while the circular indicator continues to show overall operation progress.
+- Added interactive Pause / Resume behavior to the large progress circle.
+- Added an option to hide the small Pause / Resume and Cancel buttons in the upper-right corner. The large progress-circle control and bottom Cancel button remain available.
+- Added an option to hide the percentage from the file-operation window title.
+- Improved multiple-operation support, including synchronized More / Fewer Details behavior.
+- Improved fallback to the native Windows UI for conflicts, errors, and unsupported presentation states.
+- Improved restoration and teardown when the mod is disabled, reloaded, or settings are changed.
+
 ## 1.1.0
 
 - Added Frosted Glass theme with full-window glass styling and customizable footer appearance.
