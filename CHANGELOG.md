@@ -1,7 +1,14 @@
 # File Operation Styler changelog
 
-## 1.3.0
+## 1.4.0
 
+- Added experimental support for third-party file managers using compatible native Windows file-operation dialogs.
+- Added runtime Common Controls v6 subclass API resolution for additional application processes.
+- Tested with OneCommander and File Pilot 0.8.5 standalone.
+- Added manual process inclusion instructions. Windows Explorer continues working automatically.
+- Preserved existing Explorer styling and native file-operation behavior.
+
+## 1.3.0
 - Fixed initialization on newer Windows 11 26H2 builds where the native _CalculateRate symbol is unavailable, using the existing measured transfer-rate fallback.
 - Fixed multiple simultaneous file operations extending beyond the screen by limiting the window to the monitor work area and adding vertical scrolling.
 - Added scrollbar and mouse-wheel navigation while keeping individual transfer controls and the shared footer accessible.

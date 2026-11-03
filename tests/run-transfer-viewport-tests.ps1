@@ -19,7 +19,10 @@ $testFlags = @(
 & $compiler @testFlags (Join-Path $PSScriptRoot 'transfer-viewport-tests.cpp') `
     -o $testExe -lcomctl32 -lgdi32 -lgdiplus -lshlwapi -ladvapi32 -luxtheme
 if ($LASTEXITCODE) { throw 'Viewport test compilation failed' }
-# comctl32 subclass exports require the same v6 activation context as Explorer.
+# First exercise the same production paths without an executable v6 manifest.
+& $testExe
+if ($LASTEXITCODE) { throw "Manifest-free viewport tests failed: $LASTEXITCODE" }
+# Also retain the original Explorer-like v6 host coverage.
 $manifestPath = Join-Path $testOutput 'tests.manifest'
 @'
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -29,3 +32,9 @@ $manifestPath = Join-Path $testOutput 'tests.manifest'
 if ($LASTEXITCODE) { throw 'Viewport test manifest embedding failed' }
 & $testExe
 if ($LASTEXITCODE) { throw "Viewport tests failed: $LASTEXITCODE" }
+$compatExe = Join-Path $testOutput 'common-controls-v6-tests.exe'
+& $compiler @testFlags (Join-Path $PSScriptRoot 'common-controls-v6-tests.cpp') `
+    -o $compatExe -lcomctl32 -lgdi32 -lgdiplus -lshlwapi -ladvapi32 -luxtheme
+if ($LASTEXITCODE) { throw 'Common Controls compatibility test compilation failed' }
+& $compatExe
+if ($LASTEXITCODE) { throw "Common Controls compatibility tests failed: $LASTEXITCODE" }

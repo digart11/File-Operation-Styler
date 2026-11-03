@@ -100,6 +100,38 @@ The runner uses the installed Windhawk compiler and Windows SDK manifest tool.
 Override `-CompilerRoot` or `-ManifestTool` if installed elsewhere. Build artifacts
 go to `%TEMP%\FileOperationStyler-overflow-tests`.
 
+The viewport suite runs twice: first without a v6 executable manifest, then with
+the original Explorer-like manifest. Both runs initialize the production v6
+subclass API before creating test windows and release it after UI teardown.
+
+The runner also builds `common-controls-v6-tests.cpp` as a manifest-free host.
+It retains Common Controls v5.82, then verifies that the production loader selects
+a distinct v6 module and restores the previous thread activation context. Real
+hidden-window checks cover subclass installation, reference-data updates, lookup,
+dispatch through `DefSubclassProc`, removal, destruction, and reinitialization.
+Test-only API substitutions exercise context creation/activation and DLL-loading
+failures, a wrong DLL version, and each missing required export (including
+`DllGetVersion`). Each failure must leave the API empty and return from
+`Wh_ModInit` before UI classes, GDI+, or skin target modules are initialized.
+The installed v5 DLL may expose some subclass names on other Windows builds;
+missing-export coverage is injected and does not depend on that variation.
+
+The compatibility layer uses `CreateActCtxW` with the system-directory
+`shell32.dll` manifest resource 124, which declares the Common Controls v6
+dependency on the validation machine. It activates this context only around
+`LoadLibraryExW`, deactivates it on the same thread, and releases the context.
+`DllGetVersion` must report major version 6 and all four subclass exports must
+resolve before the API is published. The owned DLL reference remains until
+final shutdown, after existing subclass/window teardown, including initialization
+rollback. No process-default or window-creation activation context is changed.
+
+Resource 124 is a Windows implementation detail; missing/changed resources or
+failed v6 selection disable initialization safely. These synthetic checks do not
+establish OneCommanderConnector or OneCommander UI compatibility. Review the x64
+production DLL's PE import table separately: none of `SetWindowSubclass`,
+`GetWindowSubclass`, `RemoveWindowSubclass`, or `DefSubclassProc` may appear as
+static imports. Keeping `-lcomctl32` in the mod metadata is intentional.
+
 The test executable includes the production source with Windhawk's inert
 `WH_EDITING` APIs. It creates isolated Win32 tool windows outside the virtual
 desktop and never installs hooks or touches Explorer/file operations. It checks:

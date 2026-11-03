@@ -651,6 +651,7 @@ namespace
 int main()
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    Check(InitializeCommonControlsSubclassApi(), "initialize v6 subclass API");
     Check(InitializeProgressCircleUi(), "initialize custom window classes");
     OperationTileElement_GetProgressHWND_Original = NoProgressWindow;
     StrToID_Original = NoElement;
@@ -661,5 +662,6 @@ int main()
     CheckNativeGeometryRewrite();
     ShutdownProgressCircleUi();
     ShutdownDwmApi();
+    ShutdownCommonControlsSubclassApi();
     std::printf("PASS: %d viewport checks\n", checks);
 }

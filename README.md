@@ -22,14 +22,14 @@ The large progress circle can pause and resume operations, while optional settin
 
 ![File Operation Styler Themes](images/file-operation-styler-themes-1.2.png)
 
-## What's new in 1.3.0
+## What's new in 1.4.0
 
-- Fixed compatibility with newer Windows 11 26H2 builds.
-- Added vertical scrolling for multiple simultaneous file operations.
-- Added mouse-wheel and scrollbar navigation.
-- Improved Glass text rendering and window resizing.
+- Added experimental support for third-party file managers that use compatible native Windows copy dialogs.
+- Improved Common Controls compatibility so the mod can also work in other application processes.
+- Third-party file managers can be enabled manually through Windhawk's custom process inclusion list.
+- Preserved the existing Windows Explorer functionality and appearance.
 
-See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
+See the [complete changelog](https://github.com/digart11/File-Operation-Styler/blob/master/CHANGELOG.md) for the full release history.
 
 ## Features
 
@@ -47,6 +47,21 @@ See [CHANGELOG.md](CHANGELOG.md) for the complete release history.
 - Several built-in themes, including Frosted Glass
 - Windows Acrylic and Custom Blur glass styles
 - Custom colors, fonts, text sizes, and progress thickness
+
+## Using another file manager?
+
+File Operation Styler works automatically with Windows Explorer. It can also work with some third-party file managers that use native Windows file-operation dialogs.
+
+1. Open File Operation Styler in Windhawk and go to **Advanced**.
+2. Find **Custom process inclusion list**.
+3. Add the file manager's actual EXE filename, one per line.
+4. Save and completely restart the file manager.
+
+Tested examples:
+- OneCommander: `OneCommander.exe`
+- File Pilot 0.8.5 standalone: `FPilot.exe`
+
+Compatibility may vary by program and version.
 
 ## Customization
 
